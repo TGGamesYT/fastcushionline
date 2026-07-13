@@ -1,0 +1,31 @@
+{
+	"schemaVersion": 1,
+	"id": "fastcushionline",
+	"version": "${version}",
+	"name": "FastCushionLine",
+	"description": "Client-side fast travel along lines of cushions. Sit-hop between evenly spaced cushions automatically in any 3D direction, with pathfinding, auto-placement and break-behind support.",
+	"authors": [
+		"TGGamesYT"
+	],
+	"contact": {
+		"homepage": "https://github.com/TGGamesYT/fastcushionline",
+		"sources": "https://github.com/TGGamesYT/fastcushionline"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/fastcushionline/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"main": [
+			"dev.tggamesyt.FastCushionLine"
+		],
+		"client": [
+			"dev.tggamesyt.client.FastCushionLineClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~26.3-",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
