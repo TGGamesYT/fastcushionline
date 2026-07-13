@@ -53,6 +53,11 @@ java {
 	// If you remove this line, sources will not be generated.
 	withSourcesJar()
 
+	// Minecraft 26.3 targets Java 25 and uses Java 25 GA APIs (e.g. Math.powExact),
+	// so this project must be built and run with a real GA JDK 25 — an early-access
+	// build (such as an IntelliJ "loom EA" JDK) crashes vanilla with
+	// NoSuchMethodError. If Gradle/IntelliJ picks such a JDK, point the Gradle JVM
+	// at a GA JDK 25 (Temurin, Corretto, Oracle, ...).
 	sourceCompatibility = JavaVersion.VERSION_25
 	targetCompatibility = JavaVersion.VERSION_25
 }

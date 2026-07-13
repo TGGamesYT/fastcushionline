@@ -44,10 +44,9 @@ public final class CushionTravelManager {
 
 	// Timing / geometry tuning (all client-side, in ticks unless noted).
 	private static final int RAPID_WINDOW = 40;   // max gap between the 3 quick sits
-	private static final int OFF_SEAT_GRACE = 12; // tolerate brief ejection during a hop
-	private static final int HOP_COOLDOWN = 3;    // wait after issuing a mount
-	private static final int PLACE_COOLDOWN = 4;  // wait after placing (entity must spawn)
-	private static final int STUCK_LIMIT = 100;   // give up if no hop happens for this long
+	private static final int OFF_SEAT_GRACE = 40; // tolerate ejection while waiting to re-mount
+	private static final int PLACE_COOLDOWN = 3;  // wait after placing (entity must spawn)
+	private static final int STUCK_LIMIT = 200;   // give up if no hop happens for this long
 	private static final double REACH_MARGIN = 0.5;
 	private static final int VERT_WINDOW = 4;     // how far up/down to look for a surface
 	private static final double ARRIVE_DIST = 2.0;
@@ -58,7 +57,7 @@ public final class CushionTravelManager {
 	private Vec3 hopDelta = null;        // per-hop displacement of the active line (null in pure target mode)
 	private Cushion lastCushion = null;  // cushion we are (or were last) sitting on
 	private Cushion hopSource = null;    // cushion we are leaving during an in-progress hop (for break-behind)
-	private int hopCooldown = 0;
+	private int placeCooldown = 0;       // brief wait after placing, for the entity to spawn
 	private int noSeatTicks = 0;
 	private int sinceProgress = 0;       // ticks since the last successful hop (stuck watchdog)
 	private int ticks = 0;
@@ -98,6 +97,7 @@ public final class CushionTravelManager {
 
 		handleToggleKey(mc, player, current);
 
+		boolean boardedNewCushion = current != lastCushion && current != null;
 		if (current != lastCushion) {
 			onSitChanged(current);
 			if (current != null) {
@@ -128,7 +128,12 @@ public final class CushionTravelManager {
 		}
 
 		if (!traveling) {
-			tryRapidSitEngage(player, current);
+			// Only consider the rapid-sit gesture on the tick we actually board a
+			// new cushion — otherwise stale sit history would re-trigger every
+			// tick, flickering between engage and stop at the end of a line.
+			if (boardedNewCushion) {
+				tryRapidSitEngage(player, current);
+			}
 			return;
 		}
 
@@ -137,8 +142,8 @@ public final class CushionTravelManager {
 			stop("you got up");
 			return;
 		}
-		if (hopCooldown > 0) {
-			hopCooldown--;
+		if (placeCooldown > 0) {
+			placeCooldown--;
 			return;
 		}
 		advance(player, level, current);
@@ -154,21 +159,23 @@ public final class CushionTravelManager {
 			return;
 		}
 		noSeatTicks++;
-		if (hopCooldown > 0) {
-			hopCooldown--;
+		if (placeCooldown > 0) {
+			placeCooldown--;
 			return;
 		}
+		// Retry mounting every tick (like a max-rate autoclicker) so we re-seat
+		// the instant the server's sitting rules allow it.
 		Cushion c = pickReachableCushion(player, level);
 		if (c != null) {
 			mountCushion(player, c);
-			hopCooldown = HOP_COOLDOWN;
-			noSeatTicks = 0;
+			noSeatTicks = 0; // still actively trying; the stuck watchdog is the real backstop
 			return;
 		}
 		if (config.autoPlace()) {
 			CushionNav.PlacePlan starter = starterPlacement(player, level);
 			if (starter != null && placeCushion(player, starter)) {
-				hopCooldown = PLACE_COOLDOWN;
+				placeCooldown = PLACE_COOLDOWN;
+				noSeatTicks = 0;
 				return;
 			}
 		}
@@ -292,14 +299,16 @@ public final class CushionTravelManager {
 		Cushion next = pickNextCushion(player, level, current, cur, range);
 		if (next != null) {
 			hopSource = current; // remember what to break behind once we board `next`
+			// Send the mount every tick (no artificial throttle) so we hop as
+			// fast as the server's sitting rules permit — as quick as, or quicker
+			// than, a manual autoclicker.
 			mountCushion(player, next);
-			hopCooldown = HOP_COOLDOWN;
 			return;
 		}
 		if (config.autoPlace()) {
 			CushionNav.PlacePlan plan = planPlacement(player, level, cur, range);
 			if (plan != null && placeCushion(player, plan)) {
-				hopCooldown = PLACE_COOLDOWN;
+				placeCooldown = PLACE_COOLDOWN;
 				return;
 			}
 		}
@@ -330,12 +339,39 @@ public final class CushionTravelManager {
 		if (hopDelta == null) {
 			return null;
 		}
-		Vec3 expected = cur.add(hopDelta);
-		Cushion c = CushionNav.cushionAt(level, expected, CushionNav.POS_EPS);
-		if (c != null && c != current && player.isWithinEntityInteractionRange(c, 1.0)) {
-			return c;
+		// Line-follow: prefer the cushion nearest the extrapolated next point
+		// (cur + hopDelta), but tolerate small spacing/alignment error so a
+		// hand-placed, not-perfectly-even line still chains reliably.
+		double spacing = hopDelta.length();
+		if (spacing < 1.0e-4) {
+			return null;
 		}
-		return null;
+		Vec3 dir = hopDelta.scale(1.0 / spacing);
+		Vec3 expected = cur.add(hopDelta);
+		double maxOffset = Math.max(0.75, spacing * 0.5);
+		Cushion best = null;
+		double bestOffset = Double.MAX_VALUE;
+		for (Cushion c : CushionNav.cushionsWithin(level, cur, spacing + range + 1.5)) {
+			if (c == current || !c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
+				continue;
+			}
+			Vec3 pos = c.position();
+			Vec3 delta = pos.subtract(cur);
+			double len = delta.length();
+			if (len < 0.4) {
+				continue;
+			}
+			// Must lie forward along the line, not off to the side or behind.
+			if (delta.scale(1.0 / len).dot(dir) < 0.9) {
+				continue;
+			}
+			double offset = pos.distanceTo(expected);
+			if (offset <= maxOffset && offset < bestOffset) {
+				bestOffset = offset;
+				best = c;
+			}
+		}
+		return best;
 	}
 
 	// ------------------------------------------------------------- placement
@@ -535,7 +571,7 @@ public final class CushionTravelManager {
 		lastCushion = current;
 		hopSource = null;
 		noSeatTicks = 0;
-		hopCooldown = 0;
+		placeCooldown = 0;
 		sinceProgress = 0;
 		savedSlot = -1;
 		actionBar(player, "FastCushionLine: travelling (" + reason + ")");
@@ -574,7 +610,7 @@ public final class CushionTravelManager {
 		lastCushion = null;
 		hopSource = null;
 		savedSlot = -1;
-		hopCooldown = 0;
+		placeCooldown = 0;
 		noSeatTicks = 0;
 		sinceProgress = 0;
 		sitHistory.clear();
@@ -606,13 +642,13 @@ public final class CushionTravelManager {
 			lastCushion = null;
 			hopSource = null;
 			noSeatTicks = 0;
-			hopCooldown = 0;
+			placeCooldown = 0;
 			sinceProgress = 0;
 			savedSlot = -1;
 			CushionNav.PlacePlan starter = starterPlacement(player, level);
 			if (starter != null) {
 				placeCushion(player, starter);
-				hopCooldown = PLACE_COOLDOWN;
+				placeCooldown = PLACE_COOLDOWN;
 			}
 			actionBar(player, "FastCushionLine: heading to " + x + ", " + z);
 		} else {
