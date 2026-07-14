@@ -9,6 +9,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
@@ -67,6 +68,20 @@ public final class CushionNav {
 				c -> c.position().distanceToSqr(center) <= radius * radius);
 	}
 
+	/** Whether there is a surface just below {@code cushionPos} to hold a cushion up. */
+	public static boolean hasSupport(Level level, Vec3 cushionPos) {
+		return Cushion.wouldSuriveAt(level, EntityTypes.CUSHION.getSpawnAABB(cushionPos));
+	}
+
+	/** Whether the cushion's own cell is free (replaceable and not already a cushion). */
+	public static boolean cellClear(Level level, Vec3 cushionPos) {
+		AABB spawnBox = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
+		if (!level.getEntitiesOfClass(Cushion.class, spawnBox).isEmpty()) {
+			return false; // already a cushion here
+		}
+		return replaceable(level, BlockPos.containing(cushionPos));
+	}
+
 	/**
 	 * Whether a cushion could legally be placed so that it rests at
 	 * {@code cushionPos}. Mirrors the vanilla {@code CushionItem}/{@code Cushion}
@@ -74,15 +89,12 @@ public final class CushionNav {
 	 * be replaceable (air/grass/…), and no other cushion may already occupy it.
 	 */
 	public static boolean isPlaceable(Level level, Vec3 cushionPos) {
-		AABB spawnBox = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
-		if (!Cushion.wouldSuriveAt(level, spawnBox)) {
-			return false; // nothing solid underneath to support it
-		}
-		if (!level.getEntitiesOfClass(Cushion.class, spawnBox).isEmpty()) {
-			return false; // already a cushion here
-		}
-		BlockState cell = level.getBlockState(BlockPos.containing(cushionPos));
-		return cell.isAir() || cell.canBeReplaced();
+		return hasSupport(level, cushionPos) && cellClear(level, cushionPos);
+	}
+
+	private static boolean replaceable(Level level, BlockPos pos) {
+		BlockState state = level.getBlockState(pos);
+		return state.isAir() || state.canBeReplaced();
 	}
 
 	/** The block that supports a cushion resting at {@code cushionPos}. */
@@ -110,6 +122,58 @@ public final class CushionNav {
 					return pos;
 				}
 			}
+		}
+		return null;
+	}
+
+	/**
+	 * Finds a cell in column ({@code bx},{@code bz}) near {@code preferredY} that
+	 * is <em>clear but unsupported</em> — i.e. a gap we could bridge by first
+	 * placing a support block beneath it. Only returns a cell whose support
+	 * position is empty and has a solid neighbour to build against.
+	 *
+	 * @return the cushion position for a bridgeable cell, or null.
+	 */
+	public static Vec3 findBridgeCellInColumn(Level level, int bx, int bz, double preferredY, int window) {
+		int base = Mth.floor(preferredY + 0.5);
+		for (int radius = 0; radius <= window; radius++) {
+			for (int sign : (radius == 0 ? new int[] {0} : new int[] {-1, 1})) {
+				int cellY = base + sign * radius;
+				Vec3 q = new Vec3(bx + 0.5, cellY, bz + 0.5);
+				if (!cellClear(level, q) || hasSupport(level, q)) {
+					continue; // occupied, or already has natural support (not a bridge case)
+				}
+				BlockPos support = supportBlock(q);
+				if (replaceable(level, support) && blockPlaceAnchor(level, support) != null) {
+					return q;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Builds the click needed to place a support block at {@code target} by
+	 * clicking a solid neighbour's face. Prefers building off the block below,
+	 * then sideways. Returns null if {@code target} isn't empty or has no solid
+	 * neighbour to place against.
+	 */
+	public static BlockHitResult blockPlaceAnchor(Level level, BlockPos target) {
+		if (!replaceable(level, target)) {
+			return null;
+		}
+		Direction[] order = {Direction.DOWN, Direction.NORTH, Direction.SOUTH,
+				Direction.EAST, Direction.WEST, Direction.UP};
+		for (Direction d : order) {
+			BlockPos neighbour = target.relative(d);
+			BlockState ns = level.getBlockState(neighbour);
+			if (ns.isAir() || ns.canBeReplaced() || !ns.isCollisionShapeFullBlock(level, neighbour)) {
+				continue;
+			}
+			Direction face = d.getOpposite(); // face of the neighbour pointing at target
+			Vec3 loc = Vec3.atCenterOf(neighbour)
+					.add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+			return new BlockHitResult(loc, face, neighbour, false);
 		}
 		return null;
 	}

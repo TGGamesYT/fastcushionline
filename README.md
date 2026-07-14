@@ -76,6 +76,14 @@ Settings (`breakbehind`, `autoplace`) persist in
 * Every candidate placement is validated exactly like the vanilla cushion item:
   there must be a supporting surface below, the cell must be air/replaceable, and
   no other cushion may already occupy it.
+* Cushions are placed and mounted **one at a time** — it commits to sitting on
+  the cushion it just placed before planning the next, so it never scatters a
+  pile of unused cushions.
+* **Gap bridging:** if there is no supported spot ahead at all (e.g. a gap
+  between two cliffs), and you have ordinary blocks in your hotbar, it will
+  place a support block and then a cushion on top to cross. This is only a
+  fallback — surface-supported spots are always preferred because they are
+  faster.
 
 ## Building
 

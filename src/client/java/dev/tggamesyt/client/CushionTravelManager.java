@@ -10,6 +10,7 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.Cushion;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.CushionItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
@@ -45,10 +46,12 @@ public final class CushionTravelManager {
 	// Timing / geometry tuning (all client-side, in ticks unless noted).
 	private static final int RAPID_WINDOW = 40;   // max gap between the 3 quick sits
 	private static final int OFF_SEAT_GRACE = 40; // tolerate ejection while waiting to re-mount
-	private static final int PLACE_COOLDOWN = 3;  // wait after placing (entity must spawn)
+	private static final int PLACE_COOLDOWN = 3;  // wait after placing (entity/block must spawn)
+	private static final int PENDING_TIMEOUT = 12; // give up waiting for a placed cushion to appear
 	private static final int STUCK_LIMIT = 200;   // give up if no hop happens for this long
 	private static final double REACH_MARGIN = 0.5;
-	private static final int VERT_WINDOW = 4;     // how far up/down to look for a surface
+	private static final double MOUNT_MATCH_EPS = 0.4;
+	private static final int VERT_WINDOW = 5;     // how far up/down to look for a surface
 	private static final double ARRIVE_DIST = 2.0;
 
 	private final FclConfig config;
@@ -57,7 +60,10 @@ public final class CushionTravelManager {
 	private Vec3 hopDelta = null;        // per-hop displacement of the active line (null in pure target mode)
 	private Cushion lastCushion = null;  // cushion we are (or were last) sitting on
 	private Cushion hopSource = null;    // cushion we are leaving during an in-progress hop (for break-behind)
-	private int placeCooldown = 0;       // brief wait after placing, for the entity to spawn
+	private Vec3 pendingCushionPos = null;       // a cushion we've committed to mount next (placed or existing)
+	private Vec3 pendingSupportCushionPos = null; // cushion to place once a bridging support block appears
+	private int pendingWait = 0;         // ticks spent waiting for a pending placement to materialise
+	private int placeCooldown = 0;       // brief wait after placing, for the entity/block to spawn
 	private int noSeatTicks = 0;
 	private int sinceProgress = 0;       // ticks since the last successful hop (stuck watchdog)
 	private int ticks = 0;
@@ -101,7 +107,8 @@ public final class CushionTravelManager {
 		if (current != lastCushion) {
 			onSitChanged(current);
 			if (current != null) {
-				sinceProgress = 0; // boarding a cushion counts as progress
+				sinceProgress = 0;  // boarding a cushion counts as progress
+				clearPending();     // completed this hop; plan the next one fresh
 			}
 			lastCushion = current;
 		}
@@ -296,27 +303,107 @@ public final class CushionTravelManager {
 		Vec3 cur = current.position();
 		double range = player.entityInteractionRange();
 
+		// Phase A: a bridging support block was placed — put the cushion on it.
+		if (pendingSupportCushionPos != null) {
+			if (CushionNav.hasSupport(level, pendingSupportCushionPos)) {
+				CushionNav.PlacePlan plan = new CushionNav.PlacePlan(pendingSupportCushionPos,
+						CushionNav.supportBlock(pendingSupportCushionPos), pendingSupportCushionPos);
+				if (placeCushion(player, plan)) {
+					pendingCushionPos = pendingSupportCushionPos;
+					pendingSupportCushionPos = null;
+					pendingWait = 0;
+					placeCooldown = PLACE_COOLDOWN;
+				}
+				return;
+			}
+			if (++pendingWait > PENDING_TIMEOUT) {
+				pendingSupportCushionPos = null;
+				pendingWait = 0;
+			}
+			return; // wait for the support block to appear
+		}
+
+		// Phase B: mount the cushion we've committed to (existing or just placed).
+		// This is decoupled from the "get closer to target" heuristic so a
+		// deliberately placed stepping-stone is always sat on — never abandoned
+		// in favour of placing yet another cushion.
+		if (pendingCushionPos != null) {
+			Cushion c = CushionNav.cushionAt(level, pendingCushionPos, MOUNT_MATCH_EPS);
+			if (c != null && c != current) {
+				if (player.isWithinEntityInteractionRange(c, 1.0)) {
+					hopSource = current;
+					mountCushion(player, c); // every tick until the server seats us
+					return;
+				}
+				pendingCushionPos = null; // unexpectedly out of reach → replan
+			} else if (c == null) {
+				if (++pendingWait <= PENDING_TIMEOUT) {
+					return; // still spawning
+				}
+				pendingCushionPos = null;
+				pendingWait = 0;
+			} else {
+				pendingCushionPos = null; // already sitting on it
+			}
+		}
+
+		// Phase C: hop onto an existing cushion that advances us.
 		Cushion next = pickNextCushion(player, level, current, cur, range);
 		if (next != null) {
-			hopSource = current; // remember what to break behind once we board `next`
-			// Send the mount every tick (no artificial throttle) so we hop as
-			// fast as the server's sitting rules permit — as quick as, or quicker
-			// than, a manual autoclicker.
+			hopSource = current;
+			pendingCushionPos = next.position();
+			pendingWait = 0;
 			mountCushion(player, next);
 			return;
 		}
-		if (config.autoPlace()) {
-			CushionNav.PlacePlan plan = planPlacement(player, level, cur, range);
-			if (plan != null && placeCushion(player, plan)) {
-				placeCooldown = PLACE_COOLDOWN;
-				return;
-			}
+
+		// Phase D: auto-place the next cushion (bridging a gap if we must).
+		if (config.autoPlace() && tryPlaceNext(player, level, cur, range)) {
+			return;
 		}
+
+		// Phase E: nowhere left to go.
 		if (hasTarget && horizDist(cur, targetX, targetZ) <= ARRIVE_DIST) {
 			stop("arrived at target");
 		} else {
 			stop("cushion line ended");
 		}
+	}
+
+	/**
+	 * Places the next cushion, committing to mount it afterwards. Prefers a spot
+	 * with a natural support surface (fast); only if none exists ahead does it
+	 * fall back to bridging a gap by first placing a support block.
+	 *
+	 * @return true if a cushion or a bridging block was placed this tick.
+	 */
+	private boolean tryPlaceNext(LocalPlayer player, Level level, Vec3 cur, double range) {
+		if (findHotbarCushionSlot(player) < 0) {
+			return false; // no cushions to place
+		}
+		Vec3 eye = player.getEyePosition();
+
+		CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
+		if (plan != null) {
+			if (placeCushion(player, plan)) {
+				pendingCushionPos = plan.cushionPos();
+				pendingWait = 0;
+				placeCooldown = PLACE_COOLDOWN;
+				return true;
+			}
+			return false;
+		}
+
+		// Nothing rests on the terrain ahead: try to bridge a gap. This is the
+		// slower fallback, so it only runs when no surface-supported spot exists.
+		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
+		if (bridge != null && placeSupportBlock(player, level, bridge.supportPos())) {
+			pendingSupportCushionPos = bridge.cushionPos();
+			pendingWait = 0;
+			placeCooldown = PLACE_COOLDOWN;
+			return true;
+		}
+		return false;
 	}
 
 	/** Existing cushion to hop to next, or null. */
@@ -383,8 +470,8 @@ public final class CushionTravelManager {
 	 * adapts height to the terrain, preserving the overall heading. Obstructed
 	 * columns are routed around with short/lateral candidates.
 	 */
-	private CushionNav.PlacePlan planPlacement(LocalPlayer player, Level level, Vec3 cur, double range) {
-		Vec3 eye = player.getEyePosition();
+	private CushionNav.PlacePlan planPlacement(LocalPlayer player, Level level, Vec3 cur, double range,
+			Vec3 eye, boolean allowBridge) {
 		Vec3 horizDir;
 		double stepLen;
 		double preferredY;
@@ -407,7 +494,10 @@ public final class CushionTravelManager {
 			double horiz = Math.sqrt(hopDelta.x * hopDelta.x + hopDelta.z * hopDelta.z);
 			preferredY = cur.y + hopDelta.y;
 			if (horiz < 0.5) {
-				// (near-)vertical line: keep using the raw delta.
+				// (near-)vertical line: keep using the raw delta (no bridging).
+				if (allowBridge) {
+					return null;
+				}
 				Vec3 q = new Vec3(Mth.floor(cur.x) + 0.5, Math.round(cur.y + hopDelta.y),
 						Mth.floor(cur.z) + 0.5);
 				return validatedPlacement(player, eye, level, q, range);
@@ -422,8 +512,10 @@ public final class CushionTravelManager {
 
 		CushionNav.PlacePlan best = null;
 		double bestScore = Double.MAX_VALUE;
+		// Farther steps first (fewer cushions, more ground per hop), each nudged
+		// increasingly sideways so the path can round obstacles.
 		double[] stepFactors = {1.0, 0.85, 0.7, 0.55, 0.4};
-		int[] laterals = {0, 1, -1, 2, -2};
+		int[] laterals = {0, 1, -1, 2, -2, 3, -3};
 
 		for (double f : stepFactors) {
 			for (int lat : laterals) {
@@ -434,7 +526,9 @@ public final class CushionTravelManager {
 				if (bx == curBx && bz == curBz) {
 					continue;
 				}
-				Vec3 q = CushionNav.findSurfaceInColumn(level, bx, bz, preferredY, VERT_WINDOW);
+				Vec3 q = allowBridge
+						? CushionNav.findBridgeCellInColumn(level, bx, bz, preferredY, VERT_WINDOW)
+						: CushionNav.findSurfaceInColumn(level, bx, bz, preferredY, VERT_WINDOW);
 				if (q == null) {
 					continue;
 				}
@@ -531,6 +625,32 @@ public final class CushionTravelManager {
 		return true;
 	}
 
+	/** Places an ordinary block at {@code support} to bridge a gap under a cushion. */
+	private boolean placeSupportBlock(LocalPlayer player, Level level, BlockPos support) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.gameMode == null || !player.isWithinBlockInteractionRange(support, 1.0)) {
+			return false;
+		}
+		int slot = findHotbarBlockSlot(player);
+		if (slot < 0) {
+			return false; // no filler blocks in the hotbar
+		}
+		BlockHitResult anchor = CushionNav.blockPlaceAnchor(level, support);
+		if (anchor == null || !player.isWithinBlockInteractionRange(anchor.getBlockPos(), 1.0)) {
+			return false;
+		}
+		Inventory inv = player.getInventory();
+		if (savedSlot < 0) {
+			savedSlot = inv.getSelectedSlot();
+		}
+		if (inv.getSelectedSlot() != slot) {
+			inv.setSelectedSlot(slot);
+		}
+		mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, anchor);
+		player.swing(InteractionHand.MAIN_HAND);
+		return true;
+	}
+
 	private int findHotbarCushionSlot(LocalPlayer player) {
 		Inventory inv = player.getInventory();
 		int hotbar = Inventory.getSelectionSize();
@@ -541,6 +661,25 @@ public final class CushionTravelManager {
 			}
 		}
 		return -1;
+	}
+
+	/** First hotbar slot holding a placeable block (cushions place entities, not blocks, so they are skipped). */
+	private int findHotbarBlockSlot(LocalPlayer player) {
+		Inventory inv = player.getInventory();
+		int hotbar = Inventory.getSelectionSize();
+		for (int i = 0; i < hotbar; i++) {
+			ItemStack stack = inv.getItem(i);
+			if (!stack.isEmpty() && stack.getItem() instanceof BlockItem) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private void clearPending() {
+		pendingCushionPos = null;
+		pendingSupportCushionPos = null;
+		pendingWait = 0;
 	}
 
 	private Cushion pickReachableCushion(LocalPlayer player, Level level) {
@@ -574,6 +713,7 @@ public final class CushionTravelManager {
 		placeCooldown = 0;
 		sinceProgress = 0;
 		savedSlot = -1;
+		clearPending();
 		actionBar(player, "FastCushionLine: travelling (" + reason + ")");
 	}
 
@@ -584,6 +724,7 @@ public final class CushionTravelManager {
 		hasTarget = false;
 		hopSource = null;
 		sinceProgress = 0;
+		clearPending();
 		restoreSlot();
 		if (was) {
 			LocalPlayer player = Minecraft.getInstance().player;
@@ -613,6 +754,7 @@ public final class CushionTravelManager {
 		placeCooldown = 0;
 		noSeatTicks = 0;
 		sinceProgress = 0;
+		clearPending();
 		sitHistory.clear();
 	}
 
@@ -645,6 +787,7 @@ public final class CushionTravelManager {
 			placeCooldown = 0;
 			sinceProgress = 0;
 			savedSlot = -1;
+			clearPending();
 			CushionNav.PlacePlan starter = starterPlacement(player, level);
 			if (starter != null) {
 				placeCushion(player, starter);
