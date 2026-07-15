@@ -27,6 +27,9 @@ public final class FclConfig {
 	 */
 	private boolean autoPlace = false;
 
+	/** Show the planned pathfinding route as a particle line in the world. */
+	private boolean showPath = true;
+
 	private final Path file;
 
 	public FclConfig() {
@@ -53,6 +56,15 @@ public final class FclConfig {
 		save();
 	}
 
+	public boolean showPath() {
+		return showPath;
+	}
+
+	public void setShowPath(boolean value) {
+		this.showPath = value;
+		save();
+	}
+
 	private void load() {
 		if (!Files.exists(file)) {
 			return;
@@ -62,6 +74,7 @@ public final class FclConfig {
 			props.load(in);
 			breakBehind = Boolean.parseBoolean(props.getProperty("breakBehind", "false"));
 			autoPlace = Boolean.parseBoolean(props.getProperty("autoPlace", "false"));
+			showPath = Boolean.parseBoolean(props.getProperty("showPath", "true"));
 		} catch (IOException e) {
 			FastCushionLine.LOGGER.warn("Could not read FastCushionLine config", e);
 		}
@@ -71,6 +84,7 @@ public final class FclConfig {
 		Properties props = new Properties();
 		props.setProperty("breakBehind", Boolean.toString(breakBehind));
 		props.setProperty("autoPlace", Boolean.toString(autoPlace));
+		props.setProperty("showPath", Boolean.toString(showPath));
 		try {
 			Files.createDirectories(file.getParent());
 			try (OutputStream out = Files.newOutputStream(file)) {

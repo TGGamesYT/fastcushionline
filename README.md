@@ -57,6 +57,7 @@ ground as possible with the fewest cushions.
 | `/fcl target clear` | Clear the target and stop. |
 | `/fcl breakbehind <true\|false>` | Break each cushion as you leave it (reclaims the item and prevents re-use of the line behind you). |
 | `/fcl autoplace <true\|false>` | When a line would end, auto-place cushions from your hotbar to continue it, keeping the line's overall heading. |
+| `/fcl showpath <true\|false>` | Show the planned route as a coloured particle line in the world (on by default). Cyan = the planned route, green = the immediate next hop. |
 | `/fcl stop` | Stop travelling and clear any target. |
 | `/fcl status` | Show current state and settings. |
 
@@ -65,13 +66,14 @@ Settings (`breakbehind`, `autoplace`) persist in
 
 ### Pathfinding & auto-placement details
 
-* **Toward a target**, the planner first tries a cheap forward step (snapping to
-  block columns and following the terrain up/down to climb stairs and hills).
-  When that's blocked, it runs a bounded **A\* search** over reachable cushion
-  spots to route *around* the obstacle — sideways, backtracking, up or down —
-  instead of giving up. It only stops when there is genuinely no reachable spot
-  at all. The route is cached and reused between hops so the search stays off the
-  hot path.
+* **Toward a target**, routing is done by a bounded **A\* search** over reachable
+  cushion spots (cached and reused between hops, so it stays off the hot path).
+  It routes *around* obstacles — sideways, backtracking, up or down — instead of
+  giving up, and vertical movement is penalised so it prefers a **level route
+  (e.g. an existing bridge) over walking down a cliff into a dead end**. It only
+  stops when there is genuinely no reachable spot at all; otherwise it heads for
+  the closest spot it can find. The planned route is drawn in the world as a
+  particle line (toggle with `/fcl showpath`).
 * With **break-behind** on, cushions the mod placed are also cleaned up when they
   fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the

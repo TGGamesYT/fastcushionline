@@ -26,11 +26,12 @@ import java.util.PriorityQueue;
  */
 public final class CushionPathfinder {
 
-	private static final int MAX_EXPANSIONS = 900;
-	private static final int VERT_WINDOW = 4;
+	private static final int MAX_EXPANSIONS = 1500;
+	private static final int VERT_WINDOW = 5;
 	private static final double REACH_MARGIN = 0.6;
 	private static final double ARRIVE_DIST = 2.0;
 	private static final double BRIDGE_PENALTY = 2.0; // prefer real surfaces over bridging
+	private static final double VERT_COST = 0.8;      // prefer level routes (e.g. a bridge) over up/down
 	private static final int MAX_REL = 200;           // search radius from the start (blocks)
 
 	private CushionPathfinder() {
@@ -63,6 +64,10 @@ public final class CushionPathfinder {
 		double bestH = horiz(start, targetX, targetZ);
 		int expansions = 0;
 
+		// Memoise column lookups within this run: the same (column, height band)
+		// is reached from many nodes, and each scan touches several blocks.
+		Map<Long, Cell> columnMemo = new HashMap<>();
+
 		while (!open.isEmpty() && expansions < MAX_EXPANSIONS) {
 			Node cur = open.poll();
 			if (cur.closed) {
@@ -94,19 +99,25 @@ public final class CushionPathfinder {
 					if (Math.abs(nbx - startBx) > MAX_REL || Math.abs(nbz - startBz) > MAX_REL) {
 						continue;
 					}
-					double stepCost = 1.0;
-					Vec3 q = CushionNav.findSurfaceInColumn(level, nbx, nbz, cur.pos.y, VERT_WINDOW, false);
-					if (q == null && allowBridge) {
-						q = CushionNav.findBridgeCellInColumn(level, nbx, nbz, cur.pos.y, VERT_WINDOW, false);
-						stepCost += BRIDGE_PENALTY;
+					int curY = Mth.floor(cur.pos.y);
+					long memoKey = key(nbx, curY, nbz, startBx, startBy, startBz);
+					Cell cell = columnMemo.get(memoKey);
+					if (cell == null) {
+						cell = computeCell(level, nbx, nbz, cur.pos.y, allowBridge);
+						columnMemo.put(memoKey, cell);
 					}
+					Vec3 q = cell.pos;
 					if (q == null || eye.distanceTo(q) > maxHop) {
 						continue;
 					}
+					double stepCost = 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0);
 					int qy = Mth.floor(q.y);
 					if (Math.abs(qy - startBy) > MAX_REL) {
 						continue;
 					}
+					// Penalise vertical change so a level route (a bridge) is
+					// preferred over descending a cliff into a dead end.
+					stepCost += VERT_COST * Math.abs(qy - Mth.floor(cur.pos.y));
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
 					Node nb = nodes.get(k);
@@ -135,6 +146,24 @@ public final class CushionPathfinder {
 		}
 		Collections.reverse(path); // start .. best
 		return path;
+	}
+
+	/** The best cushion spot in a column at a given height band, and whether it needs a bridge block. */
+	private record Cell(Vec3 pos, boolean bridged) {
+	}
+
+	private static Cell computeCell(Level level, int bx, int bz, double preferredY, boolean allowBridge) {
+		Vec3 q = CushionNav.findSurfaceInColumn(level, bx, bz, preferredY, VERT_WINDOW, false);
+		if (q != null) {
+			return new Cell(q, false);
+		}
+		if (allowBridge) {
+			Vec3 bridge = CushionNav.findBridgeCellInColumn(level, bx, bz, preferredY, VERT_WINDOW, false);
+			if (bridge != null) {
+				return new Cell(bridge, true);
+			}
+		}
+		return new Cell(null, false);
 	}
 
 	private static double heuristic(Vec3 p, double tx, double tz, double range) {

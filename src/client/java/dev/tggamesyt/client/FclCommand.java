@@ -59,6 +59,14 @@ public final class FclCommand {
 											feedback(ctx.getSource(), "autoPlace = " + v);
 											return 1;
 										})))
+						.then(literal("showpath")
+								.then(argument("value", BoolArgumentType.bool())
+										.executes(ctx -> {
+											boolean v = BoolArgumentType.getBool(ctx, "value");
+											manager.config().setShowPath(v);
+											feedback(ctx.getSource(), "showPath = " + v);
+											return 1;
+										})))
 						.then(literal("stop").executes(ctx -> {
 							manager.cancel();
 							feedback(ctx.getSource(), "Stopped.");

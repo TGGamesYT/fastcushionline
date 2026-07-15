@@ -4,6 +4,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.particles.DustParticleOptions;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
@@ -87,6 +88,12 @@ public final class CushionTravelManager {
 	private List<Vec3> cachedPath = null;
 	private boolean cachedPathBridge = false;
 
+	// Path visualisation (particle line).
+	private static final int RENDER_INTERVAL = 3;
+	private static final int ROUTE_COLOR = 0x33CCFF; // cyan: the planned route
+	private static final int NEXT_COLOR = 0x44FF66;  // green: the immediate next hop
+	private int lastRenderTick = -100;
+
 	private record Sit(Vec3 pos, int tick) {
 	}
 
@@ -109,6 +116,10 @@ public final class CushionTravelManager {
 			return;
 		}
 		ticks++;
+
+		if (traveling && config.showPath()) {
+			renderPath(level, player);
+		}
 
 		Entity vehicle = player.getVehicle();
 		Cushion current = vehicle instanceof Cushion c ? c : null;
@@ -403,31 +414,31 @@ public final class CushionTravelManager {
 		Vec3 eye = player.getEyePosition();
 		Vec3 eyeOffset = eye.subtract(cur);
 
-		// 1) Cheap forward step on a natural surface.
-		CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
-		if (plan != null) {
-			return commitPlacement(player, plan);
-		}
-		// 2) Blocked ahead: search for a way around on natural surfaces (target only).
 		if (hasTarget) {
+			// Toward a target, plan with the global obstacle-aware A* route
+			// (cached, so cheap) rather than a myopic forward step — this is what
+			// lets it take a level bridge instead of walking off a cliff. Surface
+			// route first, then one that may bridge gaps.
 			Vec3 step = aStarStep(level, cur, eyeOffset, range, false);
 			if (step != null && tryStepTo(player, level, current, eye, range, step)) {
 				return true;
 			}
-		}
-		// 3) Bridge a gap directly ahead (fallback — slower than a real surface).
-		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
-		if (bridge != null && commitBridge(player, level, bridge)) {
-			return true;
-		}
-		// 4) Last resort: search for a route that includes bridging.
-		if (hasTarget) {
-			Vec3 step = aStarStep(level, cur, eyeOffset, range, true);
-			if (step != null && tryStepTo(player, level, current, eye, range, step)) {
+			Vec3 stepB = aStarStep(level, cur, eyeOffset, range, true);
+			if (stepB != null && tryStepTo(player, level, current, eye, range, stepB)) {
 				return true;
 			}
+			// Fallback: a plain forward greedy step (flat, wide-open case).
+			CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
+			return plan != null && commitPlacement(player, plan);
 		}
-		return false;
+
+		// Line mode (no target): greedy continuation of the heading, then bridge.
+		CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
+		if (plan != null) {
+			return commitPlacement(player, plan);
+		}
+		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
+		return bridge != null && commitBridge(player, level, bridge);
 	}
 
 	/** Next cushion position along the cached A* route, recomputing it only when needed. */
@@ -630,7 +641,7 @@ public final class CushionTravelManager {
 		// Farther steps first (fewer cushions, more ground per hop), each nudged
 		// increasingly sideways so the path can round obstacles.
 		double[] stepFactors = {1.0, 0.85, 0.7, 0.55, 0.4};
-		int[] laterals = {0, 1, -1, 2, -2, 3, -3};
+		int[] laterals = {0, 1, -1, 2, -2, 3, -3, 4, -4};
 
 		for (double f : stepFactors) {
 			for (int lat : laterals) {
@@ -845,6 +856,44 @@ public final class CushionTravelManager {
 		pendingWait = 0;
 	}
 
+	// --------------------------------------------------------- path rendering
+
+	/** Draws the planned route (and the immediate next hop) as a particle line. */
+	private void renderPath(Level level, LocalPlayer player) {
+		if (ticks - lastRenderTick < RENDER_INTERVAL) {
+			return;
+		}
+		lastRenderTick = ticks;
+
+		List<Vec3> path = cachedPath;
+		if (path != null && path.size() >= 2) {
+			int limit = Math.min(path.size(), 48);
+			for (int i = 0; i + 1 < limit; i++) {
+				drawSegment(level, path.get(i), path.get(i + 1), ROUTE_COLOR);
+			}
+		}
+
+		// Always highlight the hop we're currently committing to.
+		Vec3 next = pendingCushionPos != null ? pendingCushionPos : pendingSupportCushionPos;
+		if (next != null) {
+			Vec3 from = player.getVehicle() instanceof Cushion c ? c.position() : player.position();
+			drawSegment(level, from, next, NEXT_COLOR);
+		}
+	}
+
+	private void drawSegment(Level level, Vec3 a, Vec3 b, int color) {
+		DustParticleOptions dust = new DustParticleOptions(color, 1.0f);
+		double dist = a.distanceTo(b);
+		int n = Math.max(1, (int) Math.ceil(dist / 0.4));
+		for (int i = 0; i <= n; i++) {
+			double t = (double) i / n;
+			double x = a.x + (b.x - a.x) * t;
+			double y = a.y + (b.y - a.y) * t + 0.35; // lift above the cushion surface
+			double z = a.z + (b.z - a.z) * t;
+			level.addParticle(dust, x, y, z, 0.0, 0.0, 0.0);
+		}
+	}
+
 	private Cushion pickReachableCushion(LocalPlayer player, Level level) {
 		Vec3 pos = player.position();
 		double range = player.entityInteractionRange();
@@ -998,6 +1047,7 @@ public final class CushionTravelManager {
 		}
 		sb.append(", breakBehind=").append(config.breakBehind());
 		sb.append(", autoPlace=").append(config.autoPlace());
+		sb.append(", showPath=").append(config.showPath());
 		return sb.toString();
 	}
 
