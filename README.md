@@ -65,11 +65,15 @@ Settings (`breakbehind`, `autoplace`) persist in
 
 ### Pathfinding & auto-placement details
 
-* **Toward a target**, the planner steps in the direction of the goal, snapping
-  to block columns and following the terrain surface up/down so it can climb
-  stairs and hills. Obstructed columns are routed around with short/lateral
-  candidate placements, always requiring forward progress and that the new
-  cushion stays within reach to mount.
+* **Toward a target**, the planner first tries a cheap forward step (snapping to
+  block columns and following the terrain up/down to climb stairs and hills).
+  When that's blocked, it runs a bounded **A\* search** over reachable cushion
+  spots to route *around* the obstacle — sideways, backtracking, up or down —
+  instead of giving up. It only stops when there is genuinely no reachable spot
+  at all. The route is cached and reused between hops so the search stays off the
+  hot path.
+* With **break-behind** on, cushions the mod placed are also cleaned up when they
+  fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the
   line's exact horizontal spacing and heading and only adapts the height to the
   terrain, so the line keeps the same overall angle.

@@ -73,11 +73,13 @@ public final class CushionNav {
 		return Cushion.wouldSuriveAt(level, EntityTypes.CUSHION.getSpawnAABB(cushionPos));
 	}
 
-	/** Whether the cushion's own cell is free (replaceable and not already a cushion). */
-	public static boolean cellClear(Level level, Vec3 cushionPos) {
-		AABB spawnBox = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
-		if (!level.getEntitiesOfClass(Cushion.class, spawnBox).isEmpty()) {
-			return false; // already a cushion here
+	/** Whether the cushion's own cell is free (replaceable and, when checked, not already a cushion). */
+	public static boolean cellClear(Level level, Vec3 cushionPos, boolean checkEntities) {
+		if (checkEntities) {
+			AABB spawnBox = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
+			if (!level.getEntitiesOfClass(Cushion.class, spawnBox).isEmpty()) {
+				return false; // already a cushion here
+			}
 		}
 		return replaceable(level, BlockPos.containing(cushionPos));
 	}
@@ -86,10 +88,16 @@ public final class CushionNav {
 	 * Whether a cushion could legally be placed so that it rests at
 	 * {@code cushionPos}. Mirrors the vanilla {@code CushionItem}/{@code Cushion}
 	 * checks: there must be a supporting surface just below, the cell itself must
-	 * be replaceable (air/grass/…), and no other cushion may already occupy it.
+	 * be replaceable (air/grass/…), and (when {@code checkEntities}) no other
+	 * cushion may already occupy it. The pathfinder passes {@code false} to skip
+	 * the per-cell entity query for speed; real placement always checks.
 	 */
+	public static boolean isPlaceable(Level level, Vec3 cushionPos, boolean checkEntities) {
+		return hasSupport(level, cushionPos) && cellClear(level, cushionPos, checkEntities);
+	}
+
 	public static boolean isPlaceable(Level level, Vec3 cushionPos) {
-		return hasSupport(level, cushionPos) && cellClear(level, cushionPos);
+		return isPlaceable(level, cushionPos, true);
 	}
 
 	private static boolean replaceable(Level level, BlockPos pos) {
@@ -111,6 +119,11 @@ public final class CushionNav {
 	 * @return the cushion position, or null if the column has no usable surface.
 	 */
 	public static Vec3 findSurfaceInColumn(Level level, int bx, int bz, double preferredY, int window) {
+		return findSurfaceInColumn(level, bx, bz, preferredY, window, true);
+	}
+
+	public static Vec3 findSurfaceInColumn(Level level, int bx, int bz, double preferredY, int window,
+			boolean checkEntities) {
 		int base = Mth.floor(preferredY + 0.5);
 		for (int radius = 0; radius <= window; radius++) {
 			// Prefer the height closest to preferredY; on ties try the lower one
@@ -118,7 +131,7 @@ public final class CushionNav {
 			for (int sign : (radius == 0 ? new int[] {0} : new int[] {-1, 1})) {
 				int cellY = base + sign * radius;
 				Vec3 pos = new Vec3(bx + 0.5, cellY, bz + 0.5);
-				if (isPlaceable(level, pos)) {
+				if (isPlaceable(level, pos, checkEntities)) {
 					return pos;
 				}
 			}
@@ -135,12 +148,17 @@ public final class CushionNav {
 	 * @return the cushion position for a bridgeable cell, or null.
 	 */
 	public static Vec3 findBridgeCellInColumn(Level level, int bx, int bz, double preferredY, int window) {
+		return findBridgeCellInColumn(level, bx, bz, preferredY, window, true);
+	}
+
+	public static Vec3 findBridgeCellInColumn(Level level, int bx, int bz, double preferredY, int window,
+			boolean checkEntities) {
 		int base = Mth.floor(preferredY + 0.5);
 		for (int radius = 0; radius <= window; radius++) {
 			for (int sign : (radius == 0 ? new int[] {0} : new int[] {-1, 1})) {
 				int cellY = base + sign * radius;
 				Vec3 q = new Vec3(bx + 0.5, cellY, bz + 0.5);
-				if (!cellClear(level, q) || hasSupport(level, q)) {
+				if (!cellClear(level, q, checkEntities) || hasSupport(level, q)) {
 					continue; // occupied, or already has natural support (not a bridge case)
 				}
 				BlockPos support = supportBlock(q);

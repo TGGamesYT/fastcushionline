@@ -19,7 +19,9 @@ import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -74,6 +76,16 @@ public final class CushionTravelManager {
 	private double targetX, targetZ;
 
 	private final Deque<Sit> sitHistory = new ArrayDeque<>();
+
+	// Cushions this mod has placed, so break-behind can clean up the ones left
+	// behind — including orphans from abandoned path attempts.
+	private static final int MAX_PLACED_TRACK = 24;
+	private final List<Vec3> myPlaced = new ArrayList<>();
+
+	// Cached A* route toward the target, reused across hops and only recomputed
+	// when its next node is no longer reachable (keeps pathfinding off the hot path).
+	private List<Vec3> cachedPath = null;
+	private boolean cachedPathBridge = false;
 
 	private record Sit(Vec3 pos, int tick) {
 	}
@@ -132,6 +144,12 @@ public final class CushionTravelManager {
 				breakCushion(player, hopSource);
 			}
 			hopSource = null;
+		}
+
+		// Clean up any cushions we placed that are now behind us (or orphaned by
+		// an abandoned path attempt) when break-behind is on.
+		if (traveling) {
+			breakBehindPlaced(player, level);
 		}
 
 		if (!traveling) {
@@ -358,7 +376,7 @@ public final class CushionTravelManager {
 		}
 
 		// Phase D: auto-place the next cushion (bridging a gap if we must).
-		if (config.autoPlace() && tryPlaceNext(player, level, cur, range)) {
+		if (config.autoPlace() && tryPlaceNext(player, level, current, range)) {
 			return;
 		}
 
@@ -377,27 +395,124 @@ public final class CushionTravelManager {
 	 *
 	 * @return true if a cushion or a bridging block was placed this tick.
 	 */
-	private boolean tryPlaceNext(LocalPlayer player, Level level, Vec3 cur, double range) {
+	private boolean tryPlaceNext(LocalPlayer player, Level level, Cushion current, double range) {
 		if (findHotbarCushionSlot(player) < 0) {
 			return false; // no cushions to place
 		}
+		Vec3 cur = current.position();
 		Vec3 eye = player.getEyePosition();
+		Vec3 eyeOffset = eye.subtract(cur);
 
+		// 1) Cheap forward step on a natural surface.
 		CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
 		if (plan != null) {
-			if (placeCushion(player, plan)) {
-				pendingCushionPos = plan.cushionPos();
+			return commitPlacement(player, plan);
+		}
+		// 2) Blocked ahead: search for a way around on natural surfaces (target only).
+		if (hasTarget) {
+			Vec3 step = aStarStep(level, cur, eyeOffset, range, false);
+			if (step != null && tryStepTo(player, level, current, eye, range, step)) {
+				return true;
+			}
+		}
+		// 3) Bridge a gap directly ahead (fallback — slower than a real surface).
+		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
+		if (bridge != null && commitBridge(player, level, bridge)) {
+			return true;
+		}
+		// 4) Last resort: search for a route that includes bridging.
+		if (hasTarget) {
+			Vec3 step = aStarStep(level, cur, eyeOffset, range, true);
+			if (step != null && tryStepTo(player, level, current, eye, range, step)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Next cushion position along the cached A* route, recomputing it only when needed. */
+	private Vec3 aStarStep(Level level, Vec3 cur, Vec3 eyeOffset, double range, boolean allowBridge) {
+		double maxHop = range - REACH_MARGIN;
+		if (cachedPath != null && cachedPathBridge == allowBridge) {
+			int i = nearestPathIndex(cur);
+			if (i >= 0 && i + 1 < cachedPath.size()) {
+				Vec3 nxt = cachedPath.get(i + 1);
+				if (cur.add(eyeOffset).distanceTo(nxt) <= maxHop + 0.1) {
+					return nxt;
+				}
+			}
+		}
+		cachedPath = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, allowBridge);
+		cachedPathBridge = allowBridge;
+		if (cachedPath == null) {
+			return null;
+		}
+		int i = nearestPathIndex(cur);
+		if (i < 0 || i + 1 >= cachedPath.size()) {
+			cachedPath = null;
+			return null;
+		}
+		return cachedPath.get(i + 1);
+	}
+
+	private int nearestPathIndex(Vec3 cur) {
+		if (cachedPath == null) {
+			return -1;
+		}
+		int best = -1;
+		double bestSq = 4.0; // must be within ~2 blocks of a node to count as "on path"
+		for (int i = 0; i < cachedPath.size(); i++) {
+			double d = cachedPath.get(i).distanceToSqr(cur);
+			if (d < bestSq) {
+				bestSq = d;
+				best = i;
+			}
+		}
+		return best;
+	}
+
+	/** Executes the immediate step chosen by the pathfinder: mount, place, or bridge at {@code step}. */
+	private boolean tryStepTo(LocalPlayer player, Level level, Cushion current, Vec3 eye, double range, Vec3 step) {
+		Cushion existing = CushionNav.cushionAt(level, step, MOUNT_MATCH_EPS);
+		if (existing != null) {
+			if (existing != current && player.isWithinEntityInteractionRange(existing, 1.0)) {
+				hopSource = current;
+				pendingCushionPos = step;
 				pendingWait = 0;
-				placeCooldown = PLACE_COOLDOWN;
+				mountCushion(player, existing);
 				return true;
 			}
 			return false;
 		}
+		if (!CushionNav.mountReachable(eye, step, range)) {
+			return false;
+		}
+		BlockPos support = CushionNav.supportBlock(step);
+		if (!player.isWithinBlockInteractionRange(support, 1.0)) {
+			return false;
+		}
+		if (CushionNav.isPlaceable(level, step)) {
+			return commitPlacement(player, new CushionNav.PlacePlan(step, support, step));
+		}
+		if (!CushionNav.hasSupport(level, step) && CushionNav.cellClear(level, step, true)
+				&& CushionNav.blockPlaceAnchor(level, support) != null) {
+			return commitBridge(player, level, new CushionNav.PlacePlan(step, support, step));
+		}
+		return false;
+	}
 
-		// Nothing rests on the terrain ahead: try to bridge a gap. This is the
-		// slower fallback, so it only runs when no surface-supported spot exists.
-		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
-		if (bridge != null && placeSupportBlock(player, level, bridge.supportPos())) {
+	private boolean commitPlacement(LocalPlayer player, CushionNav.PlacePlan plan) {
+		if (placeCushion(player, plan)) {
+			pendingCushionPos = plan.cushionPos();
+			pendingWait = 0;
+			placeCooldown = PLACE_COOLDOWN;
+			return true;
+		}
+		return false;
+	}
+
+	private boolean commitBridge(LocalPlayer player, Level level, CushionNav.PlacePlan bridge) {
+		if (placeSupportBlock(player, level, bridge.supportPos())) {
 			pendingSupportCushionPos = bridge.cushionPos();
 			pendingWait = 0;
 			placeCooldown = PLACE_COOLDOWN;
@@ -622,7 +737,55 @@ public final class CushionTravelManager {
 		BlockHitResult hit = new BlockHitResult(plan.hitLocation(), Direction.UP, plan.supportPos(), false);
 		mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
 		player.swing(InteractionHand.MAIN_HAND);
+		rememberPlaced(plan.cushionPos());
 		return true;
+	}
+
+	private void rememberPlaced(Vec3 pos) {
+		for (Vec3 p : myPlaced) {
+			if (p.distanceToSqr(pos) < 0.16) {
+				return; // already tracked
+			}
+		}
+		myPlaced.add(pos);
+		if (myPlaced.size() > MAX_PLACED_TRACK) {
+			myPlaced.remove(0);
+		}
+	}
+
+	/**
+	 * When break-behind is on, destroy cushions we placed that are now behind the
+	 * player (or orphaned by an abandoned path attempt). Skips the cushion we are
+	 * on and the ones we are about to use next.
+	 */
+	private void breakBehindPlaced(LocalPlayer player, Level level) {
+		if (!config.breakBehind() || myPlaced.isEmpty()) {
+			return;
+		}
+		Cushion current = player.getVehicle() instanceof Cushion c ? c : null;
+		Iterator<Vec3> it = myPlaced.iterator();
+		while (it.hasNext()) {
+			Vec3 pos = it.next();
+			Cushion c = CushionNav.cushionAt(level, pos, MOUNT_MATCH_EPS);
+			if (c == null) {
+				it.remove(); // already gone
+				continue;
+			}
+			if (c == current || near(pos, pendingCushionPos) || near(pos, pendingSupportCushionPos)) {
+				continue; // we are on it, or need it next
+			}
+			if (player.isWithinEntityInteractionRange(c, 1.0)) {
+				breakCushion(player, c);
+				it.remove();
+			} else if (player.position().distanceToSqr(pos) > (player.entityInteractionRange() + 5.0)
+					* (player.entityInteractionRange() + 5.0)) {
+				it.remove(); // too far to ever break; stop tracking
+			}
+		}
+	}
+
+	private static boolean near(Vec3 a, Vec3 b) {
+		return b != null && a.distanceToSqr(b) < 0.16;
 	}
 
 	/** Places an ordinary block at {@code support} to bridge a gap under a cushion. */
@@ -714,23 +877,31 @@ public final class CushionTravelManager {
 		sinceProgress = 0;
 		savedSlot = -1;
 		clearPending();
+		myPlaced.clear();
+		cachedPath = null;
 		actionBar(player, "FastCushionLine: travelling (" + reason + ")");
 	}
 
 	private void stop(String reason) {
 		boolean was = traveling;
+		Minecraft mc = Minecraft.getInstance();
+		LocalPlayer player = mc.player;
+		// Sweep up reachable cushions we placed (e.g. a dead-end attempt) before
+		// forgetting them, if break-behind is on.
+		if (was && player != null && mc.level != null) {
+			breakBehindPlaced(player, mc.level);
+		}
 		traveling = false;
 		hopDelta = null;
 		hasTarget = false;
 		hopSource = null;
 		sinceProgress = 0;
 		clearPending();
+		myPlaced.clear();
+		cachedPath = null;
 		restoreSlot();
-		if (was) {
-			LocalPlayer player = Minecraft.getInstance().player;
-			if (player != null) {
-				actionBar(player, "FastCushionLine: stopped (" + reason + ")");
-			}
+		if (was && player != null) {
+			actionBar(player, "FastCushionLine: stopped (" + reason + ")");
 		}
 	}
 
@@ -755,6 +926,8 @@ public final class CushionTravelManager {
 		noSeatTicks = 0;
 		sinceProgress = 0;
 		clearPending();
+		myPlaced.clear();
+		cachedPath = null;
 		sitHistory.clear();
 	}
 
@@ -788,6 +961,8 @@ public final class CushionTravelManager {
 			sinceProgress = 0;
 			savedSlot = -1;
 			clearPending();
+			myPlaced.clear();
+			cachedPath = null;
 			CushionNav.PlacePlan starter = starterPlacement(player, level);
 			if (starter != null) {
 				placeCushion(player, starter);
