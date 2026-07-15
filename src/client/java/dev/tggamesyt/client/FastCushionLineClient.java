@@ -12,10 +12,13 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
  */
 public class FastCushionLineClient implements ClientModInitializer {
 
+	/** The single travel manager, exposed so the render mixin can fetch path gizmos. */
+	public static CushionTravelManager manager;
+
 	@Override
 	public void onInitializeClient() {
 		FclConfig config = new FclConfig();
-		CushionTravelManager manager = new CushionTravelManager(config);
+		manager = new CushionTravelManager(config);
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> manager.tick());
 		FclCommand.register(manager);

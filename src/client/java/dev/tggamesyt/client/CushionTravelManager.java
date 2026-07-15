@@ -4,7 +4,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.core.particles.DustParticleOptions;
+import net.minecraft.gizmos.Gizmos;
+import net.minecraft.gizmos.SimpleGizmoCollector;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
@@ -88,11 +89,10 @@ public final class CushionTravelManager {
 	private List<Vec3> cachedPath = null;
 	private boolean cachedPathBridge = false;
 
-	// Path visualisation (particle line).
-	private static final int RENDER_INTERVAL = 3;
-	private static final int ROUTE_COLOR = 0x33CCFF; // cyan: the planned route
-	private static final int NEXT_COLOR = 0x44FF66;  // green: the immediate next hop
-	private int lastRenderTick = -100;
+	// Path visualisation (rendered as real gizmo lines via the LevelRenderer mixin).
+	private static final int ROUTE_ARGB = 0xFF33CCFF; // cyan: the planned route
+	private static final int NEXT_ARGB = 0xFF44FF66;  // green: the immediate next hop
+	private static final int MAX_DRAWN_SEGMENTS = 64;
 
 	private record Sit(Vec3 pos, int tick) {
 	}
@@ -116,10 +116,6 @@ public final class CushionTravelManager {
 			return;
 		}
 		ticks++;
-
-		if (traveling && config.showPath()) {
-			renderPath(level, player);
-		}
 
 		Entity vehicle = player.getVehicle();
 		Cushion current = vehicle instanceof Cushion c ? c : null;
@@ -858,40 +854,40 @@ public final class CushionTravelManager {
 
 	// --------------------------------------------------------- path rendering
 
-	/** Draws the planned route (and the immediate next hop) as a particle line. */
-	private void renderPath(Level level, LocalPlayer player) {
-		if (ticks - lastRenderTick < RENDER_INTERVAL) {
-			return;
+	/**
+	 * Builds the route as gizmo line instances for the LevelRenderer mixin to
+	 * draw. Called once per frame on the render thread (same thread as tick, so
+	 * no synchronisation is needed). Returns an empty list when nothing to show.
+	 */
+	public List<SimpleGizmoCollector.GizmoInstance> buildPathGizmos() {
+		if (!traveling || !config.showPath()) {
+			return List.of();
 		}
-		lastRenderTick = ticks;
-
-		List<Vec3> path = cachedPath;
-		if (path != null && path.size() >= 2) {
-			int limit = Math.min(path.size(), 48);
-			for (int i = 0; i + 1 < limit; i++) {
-				drawSegment(level, path.get(i), path.get(i + 1), ROUTE_COLOR);
+		LocalPlayer player = Minecraft.getInstance().player;
+		if (player == null) {
+			return List.of();
+		}
+		SimpleGizmoCollector collector = new SimpleGizmoCollector();
+		try (Gizmos.TemporaryCollection ignored = Gizmos.withCollector(collector)) {
+			List<Vec3> path = cachedPath;
+			if (path != null && path.size() >= 2) {
+				int limit = Math.min(path.size(), MAX_DRAWN_SEGMENTS);
+				for (int i = 0; i + 1 < limit; i++) {
+					Gizmos.line(lift(path.get(i)), lift(path.get(i + 1)), ROUTE_ARGB, 4.0f);
+				}
+			}
+			Vec3 next = pendingCushionPos != null ? pendingCushionPos : pendingSupportCushionPos;
+			if (next != null) {
+				Vec3 from = player.getVehicle() instanceof Cushion c ? c.position() : player.position();
+				Gizmos.line(lift(from), lift(next), NEXT_ARGB, 6.0f);
 			}
 		}
-
-		// Always highlight the hop we're currently committing to.
-		Vec3 next = pendingCushionPos != null ? pendingCushionPos : pendingSupportCushionPos;
-		if (next != null) {
-			Vec3 from = player.getVehicle() instanceof Cushion c ? c.position() : player.position();
-			drawSegment(level, from, next, NEXT_COLOR);
-		}
+		return collector.drainGizmos();
 	}
 
-	private void drawSegment(Level level, Vec3 a, Vec3 b, int color) {
-		DustParticleOptions dust = new DustParticleOptions(color, 1.0f);
-		double dist = a.distanceTo(b);
-		int n = Math.max(1, (int) Math.ceil(dist / 0.4));
-		for (int i = 0; i <= n; i++) {
-			double t = (double) i / n;
-			double x = a.x + (b.x - a.x) * t;
-			double y = a.y + (b.y - a.y) * t + 0.35; // lift above the cushion surface
-			double z = a.z + (b.z - a.z) * t;
-			level.addParticle(dust, x, y, z, 0.0, 0.0, 0.0);
-		}
+	/** Raise a cushion position slightly so the line sits above the cushion surface. */
+	private static Vec3 lift(Vec3 v) {
+		return new Vec3(v.x, v.y + 0.4, v.z);
 	}
 
 	private Cushion pickReachableCushion(LocalPlayer player, Level level) {

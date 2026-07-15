@@ -1,0 +1,11 @@
+{
+	"required": true,
+	"package": "dev.tggamesyt.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"LevelRendererGizmoMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

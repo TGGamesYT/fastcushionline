@@ -57,11 +57,11 @@ ground as possible with the fewest cushions.
 | `/fcl target clear` | Clear the target and stop. |
 | `/fcl breakbehind <true\|false>` | Break each cushion as you leave it (reclaims the item and prevents re-use of the line behind you). |
 | `/fcl autoplace <true\|false>` | When a line would end, auto-place cushions from your hotbar to continue it, keeping the line's overall heading. |
-| `/fcl showpath <true\|false>` | Show the planned route as a coloured particle line in the world (on by default). Cyan = the planned route, green = the immediate next hop. |
+| `/fcl showpath <true\|false>` | Show the planned route as a coloured line rendered in the world (on by default). Cyan = the planned route, green = the immediate next hop. |
 | `/fcl stop` | Stop travelling and clear any target. |
 | `/fcl status` | Show current state and settings. |
 
-Settings (`breakbehind`, `autoplace`) persist in
+Settings (`breakbehind`, `autoplace`, `showpath`) persist in
 `config/fastcushionline.properties`.
 
 ### Pathfinding & auto-placement details
@@ -73,7 +73,7 @@ Settings (`breakbehind`, `autoplace`) persist in
   (e.g. an existing bridge) over walking down a cliff into a dead end**. It only
   stops when there is genuinely no reachable spot at all; otherwise it heads for
   the closest spot it can find. The planned route is drawn in the world as a
-  particle line (toggle with `/fcl showpath`).
+  line (toggle with `/fcl showpath`).
 * With **break-behind** on, cushions the mod placed are also cleaned up when they
   fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the
