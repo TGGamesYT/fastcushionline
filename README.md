@@ -66,14 +66,15 @@ Settings (`breakbehind`, `autoplace`, `showpath`) persist in
 
 ### Pathfinding & auto-placement details
 
-* **Toward a target**, routing is done by a bounded **A\* search** over reachable
-  cushion spots (cached and reused between hops, so it stays off the hot path).
-  It routes *around* obstacles — sideways, backtracking, up or down — instead of
-  giving up, and vertical movement is penalised so it prefers a **level route
-  (e.g. an existing bridge) over walking down a cliff into a dead end**. It only
-  stops when there is genuinely no reachable spot at all; otherwise it heads for
-  the closest spot it can find. The planned route is drawn in the world as a
-  line (toggle with `/fcl showpath`).
+* **Toward a target**, routing is a bounded **A\* search** over reachable cushion
+  spots whose cost is essentially the number of hops, so it takes the **fewest-hop
+  route** — straight over a hill, onto an existing bridge, or across a short
+  self-built one — rather than a long detour. The chosen path is followed
+  node-by-node (a sticky cursor, not re-derived every hop) so it can't oscillate,
+  and it's only recomputed when the next node goes out of reach. It keeps going
+  until it reaches the target or genuinely can't get any closer, and a progress
+  watchdog stops it if it stalls. The route is drawn in the world as a line
+  (toggle with `/fcl showpath`).
 * With **break-behind** on, cushions the mod placed are also cleaned up when they
   fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the

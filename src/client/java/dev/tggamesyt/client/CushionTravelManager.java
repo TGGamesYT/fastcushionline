@@ -56,7 +56,7 @@ public final class CushionTravelManager {
 	private static final double REACH_MARGIN = 0.5;
 	private static final double MOUNT_MATCH_EPS = 0.4;
 	private static final int VERT_WINDOW = 5;     // how far up/down to look for a surface
-	private static final double ARRIVE_DIST = 2.0;
+	private static final double ARRIVE_DIST = 1.5;
 
 	private final FclConfig config;
 
@@ -84,10 +84,16 @@ public final class CushionTravelManager {
 	private static final int MAX_PLACED_TRACK = 24;
 	private final List<Vec3> myPlaced = new ArrayList<>();
 
-	// Cached A* route toward the target, reused across hops and only recomputed
-	// when its next node is no longer reachable (keeps pathfinding off the hot path).
-	private List<Vec3> cachedPath = null;
-	private boolean cachedPathBridge = false;
+	// The A* route toward the target, followed node-by-node (a sticky cursor, not
+	// re-derived every hop) so it can't oscillate, and only recomputed when the
+	// next node is no longer reachable.
+	private List<Vec3> plannedPath = null;
+	private int pathCursor = 1;
+	// Progress watchdog: stop if we stop getting closer to the target for a while
+	// (catches oscillation and genuine dead-ends without waiting forever).
+	private static final int TARGET_STALL = 200;
+	private double closestToTarget = Double.MAX_VALUE;
+	private int noProgressTicks = 0;
 
 	// Path visualisation (rendered as real gizmo lines via the LevelRenderer mixin).
 	private static final int ROUTE_ARGB = 0xFF33CCFF; // cyan: the planned route
@@ -131,10 +137,28 @@ public final class CushionTravelManager {
 			}
 			lastCushion = current;
 		}
+		// Advance along the planned route when we reach its next node.
+		if (boardedNewCushion && hasTarget && plannedPath != null && pathCursor < plannedPath.size()
+				&& current.position().distanceToSqr(plannedPath.get(pathCursor)) < 0.36) {
+			pathCursor++;
+		}
 
 		if (traveling && ++sinceProgress > STUCK_LIMIT) {
 			stop("stuck");
 			return;
+		}
+
+		// Progress watchdog: give up if we stop getting closer to the target for a
+		// while (backstop against oscillation and dead-ends).
+		if (traveling && hasTarget) {
+			double d = horizDist(player.position(), targetX, targetZ);
+			if (d < closestToTarget - 0.4) {
+				closestToTarget = d;
+				noProgressTicks = 0;
+			} else if (++noProgressTicks > TARGET_STALL) {
+				stop(String.format("no progress toward target (%.0f blocks away)", d));
+				return;
+			}
 		}
 
 		if (current == null) {
@@ -372,7 +396,44 @@ public final class CushionTravelManager {
 			}
 		}
 
-		// Phase C: hop onto an existing cushion that advances us.
+		if (hasTarget) {
+			advanceTarget(player, level, current, cur, range);
+		} else {
+			advanceLine(player, level, current, cur, range);
+		}
+	}
+
+	/** Target mode: follow the single planned A* route node-by-node. */
+	private void advanceTarget(LocalPlayer player, Level level, Cushion current, Vec3 cur, double range) {
+		double d = horizDist(cur, targetX, targetZ);
+		if (d <= ARRIVE_DIST) {
+			stop("arrived at target");
+			return;
+		}
+
+		boolean canPlace = config.autoPlace() && findHotbarCushionSlot(player) >= 0;
+		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
+
+		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
+		Vec3 node = targetNextNode(level, cur, eyeOffset, range, canBridge);
+		if (node == null) {
+			stop(String.format("stopped %.0f blocks from target (no route)", d));
+			return;
+		}
+		Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
+		if (existing == null && !canPlace) {
+			stop("no cushions in the hotbar to build toward the target");
+			return;
+		}
+		if (!stepToward(player, level, current, player.getEyePosition(), range, node)) {
+			// Couldn't act on this node — force a fresh plan next tick. The
+			// progress watchdog stops us if we truly can't get closer.
+			plannedPath = null;
+		}
+	}
+
+	/** Line mode (no target): hop the existing line, then greedily continue/​bridge it. */
+	private void advanceLine(LocalPlayer player, Level level, Cushion current, Vec3 cur, double range) {
 		Cushion next = pickNextCushion(player, level, current, cur, range);
 		if (next != null) {
 			hopSource = current;
@@ -381,131 +442,91 @@ public final class CushionTravelManager {
 			mountCushion(player, next);
 			return;
 		}
-
-		// Phase D: auto-place the next cushion (bridging a gap if we must).
-		if (config.autoPlace() && tryPlaceNext(player, level, current, range)) {
+		if (config.autoPlace() && tryPlaceLine(player, level, cur, range)) {
 			return;
 		}
-
-		// Phase E: nowhere left to go.
-		if (hasTarget && horizDist(cur, targetX, targetZ) <= ARRIVE_DIST) {
-			stop("arrived at target");
-		} else {
-			stop("cushion line ended");
-		}
+		stop("cushion line ended");
 	}
 
 	/**
-	 * Places the next cushion, committing to mount it afterwards. Prefers a spot
-	 * with a natural support surface (fast); only if none exists ahead does it
-	 * fall back to bridging a gap by first placing a support block.
-	 *
-	 * @return true if a cushion or a bridging block was placed this tick.
+	 * The next node to move to along the planned route. Sticky: it keeps
+	 * following the current path (advancing a cursor) and only recomputes when
+	 * the path is missing/finished or its next node is out of reach.
 	 */
-	private boolean tryPlaceNext(LocalPlayer player, Level level, Cushion current, double range) {
-		if (findHotbarCushionSlot(player) < 0) {
-			return false; // no cushions to place
-		}
-		Vec3 cur = current.position();
-		Vec3 eye = player.getEyePosition();
-		Vec3 eyeOffset = eye.subtract(cur);
-
-		if (hasTarget) {
-			// Toward a target, plan with the global obstacle-aware A* route
-			// (cached, so cheap) rather than a myopic forward step — this is what
-			// lets it take a level bridge instead of walking off a cliff. Surface
-			// route first, then one that may bridge gaps.
-			Vec3 step = aStarStep(level, cur, eyeOffset, range, false);
-			if (step != null && tryStepTo(player, level, current, eye, range, step)) {
-				return true;
-			}
-			Vec3 stepB = aStarStep(level, cur, eyeOffset, range, true);
-			if (stepB != null && tryStepTo(player, level, current, eye, range, stepB)) {
-				return true;
-			}
-			// Fallback: a plain forward greedy step (flat, wide-open case).
-			CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
-			return plan != null && commitPlacement(player, plan);
-		}
-
-		// Line mode (no target): greedy continuation of the heading, then bridge.
-		CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
-		if (plan != null) {
-			return commitPlacement(player, plan);
-		}
-		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
-		return bridge != null && commitBridge(player, level, bridge);
-	}
-
-	/** Next cushion position along the cached A* route, recomputing it only when needed. */
-	private Vec3 aStarStep(Level level, Vec3 cur, Vec3 eyeOffset, double range, boolean allowBridge) {
+	private Vec3 targetNextNode(Level level, Vec3 cur, Vec3 eyeOffset, double range, boolean canBridge) {
 		double maxHop = range - REACH_MARGIN;
-		if (cachedPath != null && cachedPathBridge == allowBridge) {
-			int i = nearestPathIndex(cur);
-			if (i >= 0 && i + 1 < cachedPath.size()) {
-				Vec3 nxt = cachedPath.get(i + 1);
-				if (cur.add(eyeOffset).distanceTo(nxt) <= maxHop + 0.1) {
-					return nxt;
-				}
+		Vec3 eye = cur.add(eyeOffset);
+		if (plannedPath != null && pathCursor < plannedPath.size()) {
+			Vec3 node = plannedPath.get(pathCursor);
+			if (eye.distanceTo(node) <= maxHop + 0.15) {
+				return node;
 			}
 		}
-		cachedPath = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, allowBridge);
-		cachedPathBridge = allowBridge;
-		if (cachedPath == null) {
+		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, canBridge);
+		if (path == null || path.size() < 2) {
+			plannedPath = null;
 			return null;
 		}
-		int i = nearestPathIndex(cur);
-		if (i < 0 || i + 1 >= cachedPath.size()) {
-			cachedPath = null;
+		plannedPath = path;
+		pathCursor = 1;
+		while (pathCursor < path.size() && path.get(pathCursor).distanceToSqr(cur) < 0.36) {
+			pathCursor++;
+		}
+		if (pathCursor >= path.size()) {
+			plannedPath = null;
 			return null;
 		}
-		return cachedPath.get(i + 1);
+		Vec3 node = plannedPath.get(pathCursor);
+		return eye.distanceTo(node) <= maxHop + 0.15 ? node : null;
 	}
 
-	private int nearestPathIndex(Vec3 cur) {
-		if (cachedPath == null) {
-			return -1;
-		}
-		int best = -1;
-		double bestSq = 4.0; // must be within ~2 blocks of a node to count as "on path"
-		for (int i = 0; i < cachedPath.size(); i++) {
-			double d = cachedPath.get(i).distanceToSqr(cur);
-			if (d < bestSq) {
-				bestSq = d;
-				best = i;
-			}
-		}
-		return best;
-	}
-
-	/** Executes the immediate step chosen by the pathfinder: mount, place, or bridge at {@code step}. */
-	private boolean tryStepTo(LocalPlayer player, Level level, Cushion current, Vec3 eye, double range, Vec3 step) {
-		Cushion existing = CushionNav.cushionAt(level, step, MOUNT_MATCH_EPS);
+	/** Mount the cushion at {@code node}, or (with autoplace) place / bridge one there. */
+	private boolean stepToward(LocalPlayer player, Level level, Cushion current, Vec3 eye, double range, Vec3 node) {
+		Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
 		if (existing != null) {
 			if (existing != current && player.isWithinEntityInteractionRange(existing, 1.0)) {
 				hopSource = current;
-				pendingCushionPos = step;
+				pendingCushionPos = node;
 				pendingWait = 0;
 				mountCushion(player, existing);
 				return true;
 			}
 			return false;
 		}
-		if (!CushionNav.mountReachable(eye, step, range)) {
+		if (!config.autoPlace() || findHotbarCushionSlot(player) < 0 || !CushionNav.mountReachable(eye, node, range)) {
 			return false;
 		}
-		BlockPos support = CushionNav.supportBlock(step);
+		BlockPos support = CushionNav.supportBlock(node);
 		if (!player.isWithinBlockInteractionRange(support, 1.0)) {
 			return false;
 		}
-		if (CushionNav.isPlaceable(level, step)) {
-			return commitPlacement(player, new CushionNav.PlacePlan(step, support, step));
+		if (CushionNav.isPlaceable(level, node)) {
+			return commitPlacement(player, new CushionNav.PlacePlan(node, support, node));
 		}
-		if (!CushionNav.hasSupport(level, step) && CushionNav.cellClear(level, step, true)
+		if (!CushionNav.hasSupport(level, node) && CushionNav.cellClear(level, node, true)
 				&& CushionNav.blockPlaceAnchor(level, support) != null) {
-			return commitBridge(player, level, new CushionNav.PlacePlan(step, support, step));
+			return commitBridge(player, level, new CushionNav.PlacePlan(node, support, node));
 		}
 		return false;
+	}
+
+	/**
+	 * Line mode continuation: greedily continue the heading on a natural surface,
+	 * then fall back to bridging a gap. (Target mode uses the A* route instead.)
+	 *
+	 * @return true if a cushion or a bridging block was placed this tick.
+	 */
+	private boolean tryPlaceLine(LocalPlayer player, Level level, Vec3 cur, double range) {
+		if (findHotbarCushionSlot(player) < 0) {
+			return false; // no cushions to place
+		}
+		Vec3 eye = player.getEyePosition();
+		CushionNav.PlacePlan plan = planPlacement(player, level, cur, range, eye, false);
+		if (plan != null) {
+			return commitPlacement(player, plan);
+		}
+		CushionNav.PlacePlan bridge = planPlacement(player, level, cur, range, eye, true);
+		return bridge != null && commitBridge(player, level, bridge);
 	}
 
 	private boolean commitPlacement(LocalPlayer player, CushionNav.PlacePlan plan) {
@@ -852,6 +873,13 @@ public final class CushionTravelManager {
 		pendingWait = 0;
 	}
 
+	private void resetTargetRouting() {
+		plannedPath = null;
+		pathCursor = 1;
+		closestToTarget = Double.MAX_VALUE;
+		noProgressTicks = 0;
+	}
+
 	// --------------------------------------------------------- path rendering
 
 	/**
@@ -859,6 +887,7 @@ public final class CushionTravelManager {
 	 * draw. Called once per frame on the render thread (same thread as tick, so
 	 * no synchronisation is needed). Returns an empty list when nothing to show.
 	 */
+	@SuppressWarnings("try")
 	public List<SimpleGizmoCollector.GizmoInstance> buildPathGizmos() {
 		if (!traveling || !config.showPath()) {
 			return List.of();
@@ -869,7 +898,7 @@ public final class CushionTravelManager {
 		}
 		SimpleGizmoCollector collector = new SimpleGizmoCollector();
 		try (Gizmos.TemporaryCollection ignored = Gizmos.withCollector(collector)) {
-			List<Vec3> path = cachedPath;
+			List<Vec3> path = plannedPath;
 			if (path != null && path.size() >= 2) {
 				int limit = Math.min(path.size(), MAX_DRAWN_SEGMENTS);
 				for (int i = 0; i + 1 < limit; i++) {
@@ -923,7 +952,7 @@ public final class CushionTravelManager {
 		savedSlot = -1;
 		clearPending();
 		myPlaced.clear();
-		cachedPath = null;
+		resetTargetRouting();
 		actionBar(player, "FastCushionLine: travelling (" + reason + ")");
 	}
 
@@ -943,7 +972,7 @@ public final class CushionTravelManager {
 		sinceProgress = 0;
 		clearPending();
 		myPlaced.clear();
-		cachedPath = null;
+		resetTargetRouting();
 		restoreSlot();
 		if (was && player != null) {
 			actionBar(player, "FastCushionLine: stopped (" + reason + ")");
@@ -972,7 +1001,7 @@ public final class CushionTravelManager {
 		sinceProgress = 0;
 		clearPending();
 		myPlaced.clear();
-		cachedPath = null;
+		resetTargetRouting();
 		sitHistory.clear();
 	}
 
@@ -1007,7 +1036,7 @@ public final class CushionTravelManager {
 			savedSlot = -1;
 			clearPending();
 			myPlaced.clear();
-			cachedPath = null;
+			resetTargetRouting();
 			CushionNav.PlacePlan starter = starterPlacement(player, level);
 			if (starter != null) {
 				placeCushion(player, starter);

@@ -26,13 +26,16 @@ import java.util.PriorityQueue;
  */
 public final class CushionPathfinder {
 
-	private static final int MAX_EXPANSIONS = 1500;
+	private static final int MAX_EXPANSIONS = 2500;
 	private static final int VERT_WINDOW = 5;
 	private static final double REACH_MARGIN = 0.6;
-	private static final double ARRIVE_DIST = 2.0;
-	private static final double BRIDGE_PENALTY = 2.0; // prefer real surfaces over bridging
-	private static final double VERT_COST = 0.8;      // prefer level routes (e.g. a bridge) over up/down
-	private static final int MAX_REL = 200;           // search radius from the start (blocks)
+	private static final double ARRIVE_DIST = 1.0;
+	// Cost is essentially "number of hops", so the fewest-hop route wins — which
+	// is the direct one (over a hill, onto a bridge, or a short self-built bridge)
+	// rather than a long detour. Bridging costs a little extra so a real surface
+	// of similar length is preferred, but not enough to favour a big detour.
+	private static final double BRIDGE_PENALTY = 0.5;
+	private static final int MAX_REL = 220;           // search radius from the start (blocks)
 
 	private CushionPathfinder() {
 	}
@@ -115,9 +118,6 @@ public final class CushionPathfinder {
 					if (Math.abs(qy - startBy) > MAX_REL) {
 						continue;
 					}
-					// Penalise vertical change so a level route (a bridge) is
-					// preferred over descending a cliff into a dead end.
-					stepCost += VERT_COST * Math.abs(qy - Mth.floor(cur.pos.y));
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
 					Node nb = nodes.get(k);
