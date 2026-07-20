@@ -208,11 +208,15 @@ public final class CushionNav {
 
 	/**
 	 * Whether a cushion at {@code cushionPos} could be reached (to mount it) from
-	 * the given eye position, honouring the player's entity-interaction-range
-	 * attribute. A small slack accounts for the cushion's own size.
+	 * the given eye position. This mirrors vanilla's real reach test, which
+	 * measures the eye to the nearest point of the cushion's bounding box (not its
+	 * centre) against the entity-interaction-range attribute — so it correctly
+	 * allows the longer diagonal hops (e.g. 2×2 and 3×1) the game permits.
 	 */
 	public static boolean mountReachable(Vec3 eye, Vec3 cushionPos, double entityRange) {
-		return eye.distanceTo(cushionPos) <= entityRange + 0.5;
+		AABB box = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
+		double max = entityRange - 0.1; // small safety margin under the true limit
+		return box.distanceToSqr(eye) <= max * max;
 	}
 
 	/** Direction of the UP face, used when simulating cushion placement clicks. */

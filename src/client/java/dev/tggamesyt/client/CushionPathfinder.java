@@ -1,15 +1,19 @@
 package dev.tggamesyt.client;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.decoration.Cushion;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Set;
 
 /**
  * Bounded A* search over cushion positions, used to route toward a
@@ -26,16 +30,19 @@ import java.util.PriorityQueue;
  */
 public final class CushionPathfinder {
 
-	private static final int MAX_EXPANSIONS = 2500;
+	private static final int MAX_EXPANSIONS = 6000;
 	private static final int VERT_WINDOW = 5;
-	private static final double REACH_MARGIN = 0.6;
 	private static final double ARRIVE_DIST = 1.0;
 	// Cost is essentially "number of hops", so the fewest-hop route wins — which
 	// is the direct one (over a hill, onto a bridge, or a short self-built bridge)
 	// rather than a long detour. Bridging costs a little extra so a real surface
 	// of similar length is preferred, but not enough to favour a big detour.
 	private static final double BRIDGE_PENALTY = 0.5;
-	private static final int MAX_REL = 220;           // search radius from the start (blocks)
+	// Hopping onto a cushion that already exists is nearly free, so an existing
+	// line is strongly preferred over placing a fresh parallel one beside it.
+	private static final double EXISTING_COST = 0.15;
+	private static final double EXISTING_RADIUS = 48.0;
+	private static final int MAX_REL = 256;           // search radius from the start (blocks)
 
 	private CushionPathfinder() {
 	}
@@ -49,10 +56,16 @@ public final class CushionPathfinder {
 	public static List<Vec3> plan(Level level, Vec3 start, Vec3 eyeOffset, double targetX, double targetZ,
 			double entityRange, boolean allowBridge) {
 		int reach = Math.max(1, (int) Math.ceil(entityRange));
-		double maxHop = entityRange - REACH_MARGIN;
 		int startBx = Mth.floor(start.x);
 		int startBy = Mth.floor(start.y);
 		int startBz = Mth.floor(start.z);
+
+		// Snapshot existing cushions once so we can prefer reusing a line over
+		// placing a parallel one (checked per node, not per neighbour scan).
+		Set<Long> existing = new HashSet<>();
+		for (Cushion c : CushionNav.cushionsWithin(level, start, EXISTING_RADIUS)) {
+			existing.add(BlockPos.containing(c.position()).asLong());
+		}
 
 		Map<Long, Node> nodes = new HashMap<>();
 		PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Double.compare(a.f, b.f));
@@ -110,14 +123,16 @@ public final class CushionPathfinder {
 						columnMemo.put(memoKey, cell);
 					}
 					Vec3 q = cell.pos;
-					if (q == null || eye.distanceTo(q) > maxHop) {
+					if (q == null || !CushionNav.mountReachable(eye, q, entityRange)) {
 						continue;
 					}
-					double stepCost = 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0);
 					int qy = Mth.floor(q.y);
 					if (Math.abs(qy - startBy) > MAX_REL) {
 						continue;
 					}
+					double stepCost = existing.contains(BlockPos.asLong(nbx, qy, nbz))
+							? EXISTING_COST
+							: 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0);
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
 					Node nb = nodes.get(k);

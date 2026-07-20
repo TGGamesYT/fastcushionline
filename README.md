@@ -42,12 +42,14 @@ target.
 
 ## Interaction range is respected
 
-Reaching the next cushion uses your **entity interaction range** attribute and
-placing cushions uses your **block interaction range** attribute, so anything
-that modifies those (e.g. attribute modifiers) automatically changes how far
-apart cushions may be while still chaining. When auto-placing toward a target
-the mod spaces cushions near the edge of your reach, so each hop covers as much
-ground as possible with the fewest cushions.
+Reaching the next cushion uses your **entity interaction range** attribute
+(measured to the cushion's hitbox, exactly like vanilla — so the longer diagonal
+hops such as 2×2 and 3×1 are used) and placing cushions uses your **block
+interaction range** attribute. Anything that modifies those (e.g. attribute
+modifiers) automatically changes how far apart cushions may be while still
+chaining. The pathfinder takes the **fewest-hop** route, so each hop covers as
+much ground as your reach allows, and it strongly **prefers reusing an existing
+cushion line** over placing a parallel one beside it.
 
 ## The `/fcl` command
 

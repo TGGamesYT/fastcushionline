@@ -454,11 +454,10 @@ public final class CushionTravelManager {
 	 * the path is missing/finished or its next node is out of reach.
 	 */
 	private Vec3 targetNextNode(Level level, Vec3 cur, Vec3 eyeOffset, double range, boolean canBridge) {
-		double maxHop = range - REACH_MARGIN;
 		Vec3 eye = cur.add(eyeOffset);
 		if (plannedPath != null && pathCursor < plannedPath.size()) {
 			Vec3 node = plannedPath.get(pathCursor);
-			if (eye.distanceTo(node) <= maxHop + 0.15) {
+			if (CushionNav.mountReachable(eye, node, range)) {
 				return node;
 			}
 		}
@@ -477,7 +476,7 @@ public final class CushionTravelManager {
 			return null;
 		}
 		Vec3 node = plannedPath.get(pathCursor);
-		return eye.distanceTo(node) <= maxHop + 0.15 ? node : null;
+		return CushionNav.mountReachable(eye, node, range) ? node : null;
 	}
 
 	/** Mount the cushion at {@code node}, or (with autoplace) place / bridge one there. */
