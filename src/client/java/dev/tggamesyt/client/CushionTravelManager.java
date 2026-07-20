@@ -415,7 +415,7 @@ public final class CushionTravelManager {
 		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
 
 		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
-		Vec3 node = targetNextNode(level, cur, eyeOffset, range, canBridge);
+		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge);
 		if (node == null) {
 			stop(String.format("stopped %.0f blocks from target (no route)", d));
 			return;
@@ -453,7 +453,8 @@ public final class CushionTravelManager {
 	 * following the current path (advancing a cursor) and only recomputes when
 	 * the path is missing/finished or its next node is out of reach.
 	 */
-	private Vec3 targetNextNode(Level level, Vec3 cur, Vec3 eyeOffset, double range, boolean canBridge) {
+	private Vec3 targetNextNode(Level level, Vec3 cur, Vec3 eyeOffset, double range, double blockRange,
+			boolean canBridge) {
 		Vec3 eye = cur.add(eyeOffset);
 		if (plannedPath != null && pathCursor < plannedPath.size()) {
 			Vec3 node = plannedPath.get(pathCursor);
@@ -461,7 +462,7 @@ public final class CushionTravelManager {
 				return node;
 			}
 		}
-		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, canBridge);
+		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, blockRange, canBridge);
 		if (path == null || path.size() < 2) {
 			plannedPath = null;
 			return null;

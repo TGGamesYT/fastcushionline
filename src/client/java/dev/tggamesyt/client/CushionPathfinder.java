@@ -54,7 +54,11 @@ public final class CushionPathfinder {
 	 *         if not a single neighbouring spot is reachable.
 	 */
 	public static List<Vec3> plan(Level level, Vec3 start, Vec3 eyeOffset, double targetX, double targetZ,
-			double entityRange, boolean allowBridge) {
+			double entityRange, double blockRange, boolean allowBridge) {
+		// Mounting an existing cushion only needs entity-interaction range; placing
+		// a new one also needs to reach the support block, so it is limited by
+		// whichever of the two ranges is smaller.
+		double placeRange = Math.min(entityRange, blockRange);
 		int reach = Math.max(1, (int) Math.ceil(entityRange));
 		int startBx = Mth.floor(start.x);
 		int startBy = Mth.floor(start.y);
@@ -123,16 +127,19 @@ public final class CushionPathfinder {
 						columnMemo.put(memoKey, cell);
 					}
 					Vec3 q = cell.pos;
-					if (q == null || !CushionNav.mountReachable(eye, q, entityRange)) {
+					if (q == null) {
 						continue;
 					}
 					int qy = Mth.floor(q.y);
 					if (Math.abs(qy - startBy) > MAX_REL) {
 						continue;
 					}
-					double stepCost = existing.contains(BlockPos.asLong(nbx, qy, nbz))
-							? EXISTING_COST
-							: 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0);
+					boolean isExisting = existing.contains(BlockPos.asLong(nbx, qy, nbz));
+					double nodeRange = isExisting ? entityRange : placeRange;
+					if (!CushionNav.mountReachable(eye, q, nodeRange)) {
+						continue;
+					}
+					double stepCost = isExisting ? EXISTING_COST : 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0);
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
 					Node nb = nodes.get(k);
