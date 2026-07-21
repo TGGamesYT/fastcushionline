@@ -207,15 +207,17 @@ public final class CushionNav {
 	}
 
 	/**
-	 * Whether a cushion at {@code cushionPos} could be reached (to mount it) from
-	 * the given eye position. This mirrors vanilla's real reach test, which
-	 * measures the eye to the nearest point of the cushion's bounding box (not its
-	 * centre) against the entity-interaction-range attribute — so it correctly
-	 * allows the longer diagonal hops (e.g. 2×2 and 3×1) the game permits.
+	 * Whether a cushion at {@code cushionPos} could be reached from the given eye
+	 * position. Mirrors vanilla's real reach test, which measures the eye to the
+	 * nearest point of the cushion's <em>hitbox</em> (not its centre) against the
+	 * interaction-range attribute. Measuring to the hitbox edge is why a 3×1 hop
+	 * (centre distance √10 ≈ 3.16, over the 3.0 range) is still reachable — its
+	 * near edge sits inside the range. A tiny tolerance is added so boundary hops
+	 * like that aren't lost (the server is far more lenient still).
 	 */
-	public static boolean mountReachable(Vec3 eye, Vec3 cushionPos, double entityRange) {
+	public static boolean mountReachable(Vec3 eye, Vec3 cushionPos, double range) {
 		AABB box = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
-		double max = entityRange - 0.1; // small safety margin under the true limit
+		double max = range + 0.1;
 		return box.distanceToSqr(eye) <= max * max;
 	}
 
