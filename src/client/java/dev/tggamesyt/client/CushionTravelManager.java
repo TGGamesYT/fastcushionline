@@ -411,6 +411,19 @@ public final class CushionTravelManager {
 			return;
 		}
 
+		// Reuse existing cushions first: hop directly to whichever reachable
+		// cushion gets closest to the target. This is what makes it ride the line
+		// it's already on (or one it just placed) instead of laying a parallel
+		// one beside it, and it needs no placement, so it's the fastest option.
+		Cushion reuse = bestExistingToward(player, level, current, cur, d);
+		if (reuse != null) {
+			hopSource = current;
+			pendingCushionPos = reuse.position();
+			pendingWait = 0;
+			mountCushion(player, reuse);
+			return;
+		}
+
 		boolean canPlace = config.autoPlace() && findHotbarCushionSlot(player) >= 0;
 		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
 
@@ -430,6 +443,29 @@ public final class CushionTravelManager {
 			// progress watchdog stops us if we truly can't get closer.
 			plannedPath = null;
 		}
+	}
+
+	/**
+	 * The reachable existing cushion (other than the current one) that gets us
+	 * closest to the target, or null if none makes real progress. Prefers the
+	 * one nearest the target so it hops as far along an existing line as its
+	 * reach allows.
+	 */
+	private Cushion bestExistingToward(LocalPlayer player, Level level, Cushion current, Vec3 cur, double curDist) {
+		double bestDist = curDist - 0.5; // require meaningful progress toward the target
+		Cushion best = null;
+		double radius = player.entityInteractionRange() + 2.0;
+		for (Cushion c : CushionNav.cushionsWithin(level, player.getEyePosition(), radius)) {
+			if (c == current || !c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
+				continue;
+			}
+			double dd = horizDist(c.position(), targetX, targetZ);
+			if (dd < bestDist) {
+				bestDist = dd;
+				best = c;
+			}
+		}
+		return best;
 	}
 
 	/** Line mode (no target): hop the existing line, then greedily continue/​bridge it. */
