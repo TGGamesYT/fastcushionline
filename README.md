@@ -1,10 +1,12 @@
 # FastCushionLine
 
-A **client-side** Fabric mod for Minecraft **26.3** cushions (built against
-**26.3-snapshot-4**, and compatible with **26.3-snapshot-3** — it depends on the
-whole 26.3 range). It turns a row of cushions into a fast-travel rail: sit down
-and you are automatically hopped from cushion to cushion until the line ends or
-you get up.
+A **client-side** Fabric mod for Minecraft **26.3** cushions. It works on **every
+26.3 snapshot that has cushions — snapshot-3 onward** (built against the latest,
+snapshot-7): it only calls API that is identical across those versions, and the
+one cushion method that was renamed along the way is reimplemented internally, so
+a single build runs on all of them. It turns a row of cushions into a fast-travel
+rail: sit down and you are automatically hopped from cushion to cushion until the
+line ends or you get up.
 
 Everything is done client-side by sending the exact same interact / attack /
 use-item packets a player could send by hand, so it works on normal

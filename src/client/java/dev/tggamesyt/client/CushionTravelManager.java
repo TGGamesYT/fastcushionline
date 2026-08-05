@@ -770,7 +770,6 @@ public final class CushionTravelManager {
 		}
 		EntityHitResult hit = new EntityHitResult(c, c.position());
 		mc.gameMode.interact(player, c, hit, InteractionHand.MAIN_HAND);
-		player.swing(InteractionHand.MAIN_HAND);
 	}
 
 	private void breakCushion(LocalPlayer player, Cushion c) {
@@ -779,7 +778,6 @@ public final class CushionTravelManager {
 			return;
 		}
 		mc.gameMode.attack(player, c);
-		player.swing(InteractionHand.MAIN_HAND);
 	}
 
 	private boolean placeCushion(LocalPlayer player, CushionNav.PlacePlan plan) {
@@ -800,7 +798,6 @@ public final class CushionTravelManager {
 		}
 		BlockHitResult hit = new BlockHitResult(plan.hitLocation(), Direction.UP, plan.supportPos(), false);
 		mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
-		player.swing(InteractionHand.MAIN_HAND);
 		rememberPlaced(plan.cushionPos());
 		return true;
 	}
@@ -874,7 +871,6 @@ public final class CushionTravelManager {
 			inv.setSelectedSlot(slot);
 		}
 		mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, anchor);
-		player.swing(InteractionHand.MAIN_HAND);
 		return true;
 	}
 

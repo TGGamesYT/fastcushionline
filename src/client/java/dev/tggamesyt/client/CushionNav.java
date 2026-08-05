@@ -11,6 +11,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.util.List;
 
@@ -68,9 +69,24 @@ public final class CushionNav {
 				c -> c.position().distanceToSqr(center) <= radius * radius);
 	}
 
-	/** Whether there is a surface just below {@code cushionPos} to hold a cushion up. */
+	/**
+	 * Whether there is a surface just below {@code cushionPos} to hold a cushion
+	 * up. This reimplements vanilla's cushion anchor check with stable block-shape
+	 * API instead of calling the game's own method, whose name changed across the
+	 * 26.3 snapshots (wouldSuriveAt → wouldSurviveAt / canBePlacedAt) — so the same
+	 * build works on every cushion snapshot.
+	 */
 	public static boolean hasSupport(Level level, Vec3 cushionPos) {
-		return Cushion.wouldSuriveAt(level, EntityTypes.CUSHION.getSpawnAABB(cushionPos));
+		AABB box = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
+		AABB anchorBox = new AABB(box.minX, box.minY - 0.015625, box.minZ,
+				Math.nextDown(box.maxX), box.minY, Math.nextDown(box.maxZ));
+		for (BlockPos pos : BlockPos.betweenClosed(anchorBox)) {
+			VoxelShape shape = level.getBlockState(pos).getShape(level, pos);
+			if (!shape.isEmpty() && shape.move(pos).bounds().intersects(anchorBox)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Whether the cushion's own cell is free (replaceable and, when checked, not already a cushion). */
