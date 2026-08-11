@@ -13,6 +13,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.List;
 
 /**
@@ -70,14 +72,45 @@ public final class CushionNav {
 	}
 
 	/**
-	 * Whether there is a surface just below {@code cushionPos} to hold a cushion
-	 * up. This reimplements vanilla's cushion anchor check with stable block-shape
-	 * API instead of calling the game's own method, whose name changed across the
-	 * 26.3 snapshots (wouldSuriveAt → wouldSurviveAt / canBePlacedAt) — so the same
-	 * build works on every cushion snapshot.
+	 * The game's own cushion anchor check, looked up by name so we call it when it
+	 * exists. Its name changed across the 26.3 snapshots (wouldSuriveAt →
+	 * wouldSurviveAt), so several are tried; if none resolves — e.g. in a remapped
+	 * production jar, where reflection by the dev name won't match the runtime
+	 * name — {@link #hasSupport} falls back to a faithful reimplementation. This
+	 * keeps it correct on every 26.3 version, including the release, without a
+	 * per-version build.
 	 */
+	private static final Method GAME_SUPPORT_CHECK = resolveSupportCheck();
+
+	private static Method resolveSupportCheck() {
+		for (String name : new String[] {"wouldSurviveAt", "wouldSuriveAt"}) {
+			try {
+				Method m = Cushion.class.getMethod(name, Level.class, AABB.class);
+				if (Modifier.isStatic(m.getModifiers()) && m.getReturnType() == boolean.class) {
+					return m;
+				}
+			} catch (NoSuchMethodException ignored) {
+				// try the next candidate name
+			}
+		}
+		return null;
+	}
+
+	/** Whether there is a surface just below {@code cushionPos} to hold a cushion up. */
 	public static boolean hasSupport(Level level, Vec3 cushionPos) {
 		AABB box = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
+		if (GAME_SUPPORT_CHECK != null) {
+			try {
+				return (Boolean) GAME_SUPPORT_CHECK.invoke(null, level, box);
+			} catch (ReflectiveOperationException ignored) {
+				// fall through to the reimplementation
+			}
+		}
+		return anchorBelow(level, box);
+	}
+
+	/** Faithful reimplementation of vanilla's cushion anchor check, using stable block-shape API. */
+	private static boolean anchorBelow(Level level, AABB box) {
 		AABB anchorBox = new AABB(box.minX, box.minY - 0.015625, box.minZ,
 				Math.nextDown(box.maxX), box.minY, Math.nextDown(box.maxZ));
 		for (BlockPos pos : BlockPos.betweenClosed(anchorBox)) {

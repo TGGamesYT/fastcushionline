@@ -10,6 +10,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.decoration.Cushion;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.BlockItem;
@@ -20,6 +21,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -770,6 +772,7 @@ public final class CushionTravelManager {
 		}
 		EntityHitResult hit = new EntityHitResult(c, c.position());
 		mc.gameMode.interact(player, c, hit, InteractionHand.MAIN_HAND);
+		swing(player);
 	}
 
 	private void breakCushion(LocalPlayer player, Cushion c) {
@@ -778,6 +781,7 @@ public final class CushionTravelManager {
 			return;
 		}
 		mc.gameMode.attack(player, c);
+		swing(player);
 	}
 
 	private boolean placeCushion(LocalPlayer player, CushionNav.PlacePlan plan) {
@@ -798,6 +802,7 @@ public final class CushionTravelManager {
 		}
 		BlockHitResult hit = new BlockHitResult(plan.hitLocation(), Direction.UP, plan.supportPos(), false);
 		mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
+		swing(player);
 		rememberPlaced(plan.cushionPos());
 		return true;
 	}
@@ -871,7 +876,40 @@ public final class CushionTravelManager {
 			inv.setSelectedSlot(slot);
 		}
 		mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, anchor);
+		swing(player);
 		return true;
+	}
+
+	// The arm-swing animation, resolved by name because the signature changed in
+	// snapshot-7 (swing(hand[,bool]) -> swing(hand, SwingAnimation, bool)). Purely
+	// cosmetic, so if no known form resolves it is simply skipped.
+	private static final Method SWING_METHOD = resolveSwing();
+
+	private static Method resolveSwing() {
+		try {
+			return LivingEntity.class.getMethod("swing", InteractionHand.class);
+		} catch (NoSuchMethodException e) {
+			try {
+				return LivingEntity.class.getMethod("swing", InteractionHand.class, boolean.class);
+			} catch (NoSuchMethodException ignored) {
+				return null;
+			}
+		}
+	}
+
+	private void swing(LocalPlayer player) {
+		if (SWING_METHOD == null) {
+			return;
+		}
+		try {
+			if (SWING_METHOD.getParameterCount() == 1) {
+				SWING_METHOD.invoke(player, InteractionHand.MAIN_HAND);
+			} else {
+				SWING_METHOD.invoke(player, InteractionHand.MAIN_HAND, false);
+			}
+		} catch (ReflectiveOperationException ignored) {
+			// cosmetic only
+		}
 	}
 
 	private int findHotbarCushionSlot(LocalPlayer player) {
