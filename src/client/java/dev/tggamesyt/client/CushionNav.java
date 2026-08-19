@@ -13,8 +13,6 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.List;
 
 /**
@@ -72,45 +70,22 @@ public final class CushionNav {
 	}
 
 	/**
-	 * The game's own cushion anchor check, looked up by name so we call it when it
-	 * exists. Its name changed across the 26.3 snapshots (wouldSuriveAt →
-	 * wouldSurviveAt), so several are tried; if none resolves — e.g. in a remapped
-	 * production jar, where reflection by the dev name won't match the runtime
-	 * name — {@link #hasSupport} falls back to a faithful reimplementation. This
-	 * keeps it correct on every 26.3 version, including the release, without a
-	 * per-version build.
+	 * Whether there is a surface just below {@code cushionPos} to hold a cushion up.
+	 *
+	 * <p>This is deliberately a faithful reimplementation of vanilla's anchor test
+	 * rather than a call to the game's public {@code Cushion.wouldSurviveAt}. That
+	 * method is <em>not</em> a pure "is there support below" check — it is
+	 * {@code hasAnchorBelow(box) && !isCoveredByFullBlocks(box)}, i.e. it also
+	 * rejects a spot whose own cell is enclosed by full blocks, and its anchor scan
+	 * reaches further down. Our callers want only the support half: {@link
+	 * #isPlaceable} pairs this with a separate {@link #cellClear} check, and {@link
+	 * #findBridgeCellInColumn} relies on {@code !hasSupport} meaning "no surface
+	 * below" specifically. Folding coverage into this predicate changes placement
+	 * and bridging decisions, so we keep the precise, stable-API reimplementation —
+	 * which also works unchanged across the whole 26.3 line.</p>
 	 */
-	private static final Method GAME_SUPPORT_CHECK = resolveSupportCheck();
-
-	private static Method resolveSupportCheck() {
-		for (String name : new String[] {"wouldSurviveAt", "wouldSuriveAt"}) {
-			try {
-				Method m = Cushion.class.getMethod(name, Level.class, AABB.class);
-				if (Modifier.isStatic(m.getModifiers()) && m.getReturnType() == boolean.class) {
-					return m;
-				}
-			} catch (NoSuchMethodException ignored) {
-				// try the next candidate name
-			}
-		}
-		return null;
-	}
-
-	/** Whether there is a surface just below {@code cushionPos} to hold a cushion up. */
 	public static boolean hasSupport(Level level, Vec3 cushionPos) {
 		AABB box = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
-		if (GAME_SUPPORT_CHECK != null) {
-			try {
-				return (Boolean) GAME_SUPPORT_CHECK.invoke(null, level, box);
-			} catch (ReflectiveOperationException ignored) {
-				// fall through to the reimplementation
-			}
-		}
-		return anchorBelow(level, box);
-	}
-
-	/** Faithful reimplementation of vanilla's cushion anchor check, using stable block-shape API. */
-	private static boolean anchorBelow(Level level, AABB box) {
 		AABB anchorBox = new AABB(box.minX, box.minY - 0.015625, box.minZ,
 				Math.nextDown(box.maxX), box.minY, Math.nextDown(box.maxZ));
 		for (BlockPos pos : BlockPos.betweenClosed(anchorBox)) {
