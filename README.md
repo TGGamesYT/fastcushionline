@@ -1,18 +1,8 @@
 # FastCushionLine
 
-A **client-side** Fabric mod for Minecraft **26.3** cushions. It targets the
-whole 26.3 line — every snapshot from **snapshot-3** (which added cushions)
-onward, plus the pre-releases, release candidates and **26.3** itself once it
-lands (assuming the cushion format/APIs don't change) — from a single build.
-Almost everything it calls is identical across those versions. The cushion
-support test is a small, faithful reimplementation over stable block APIs (the
-game's public `wouldSurviveAt` also folds in a "buried by full blocks" check
-that this mod deliberately keeps separate), and the one purely cosmetic call
-that changed signatures along the way — the arm-swing animation — is invoked by
-name via reflection when present and skipped otherwise. So it stays correct
-without a per-version build. It turns a row of cushions into a fast-travel rail:
-sit down and you are automatically hopped from cushion to cushion until the line
-ends or you get up.
+A **client-side** Fabric mod for Minecraft **26.3** cushions. It turns a row of
+cushions into a fast-travel rail: sit down and you are automatically hopped from
+cushion to cushion until the line ends or you get up.
 
 Everything is done client-side by sending the exact same interact / attack /
 use-item packets a player could send by hand, so it works on normal

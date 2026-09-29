@@ -11,7 +11,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.util.List;
 
@@ -69,32 +68,9 @@ public final class CushionNav {
 				c -> c.position().distanceToSqr(center) <= radius * radius);
 	}
 
-	/**
-	 * Whether there is a surface just below {@code cushionPos} to hold a cushion up.
-	 *
-	 * <p>This is deliberately a faithful reimplementation of vanilla's anchor test
-	 * rather than a call to the game's public {@code Cushion.wouldSurviveAt}. That
-	 * method is <em>not</em> a pure "is there support below" check — it is
-	 * {@code hasAnchorBelow(box) && !isCoveredByFullBlocks(box)}, i.e. it also
-	 * rejects a spot whose own cell is enclosed by full blocks, and its anchor scan
-	 * reaches further down. Our callers want only the support half: {@link
-	 * #isPlaceable} pairs this with a separate {@link #cellClear} check, and {@link
-	 * #findBridgeCellInColumn} relies on {@code !hasSupport} meaning "no surface
-	 * below" specifically. Folding coverage into this predicate changes placement
-	 * and bridging decisions, so we keep the precise, stable-API reimplementation —
-	 * which also works unchanged across the whole 26.3 line.</p>
-	 */
+	/** Whether there is a surface just below {@code cushionPos} to hold a cushion up. */
 	public static boolean hasSupport(Level level, Vec3 cushionPos) {
-		AABB box = EntityTypes.CUSHION.getSpawnAABB(cushionPos);
-		AABB anchorBox = new AABB(box.minX, box.minY - 0.015625, box.minZ,
-				Math.nextDown(box.maxX), box.minY, Math.nextDown(box.maxZ));
-		for (BlockPos pos : BlockPos.betweenClosed(anchorBox)) {
-			VoxelShape shape = level.getBlockState(pos).getShape(level, pos);
-			if (!shape.isEmpty() && shape.move(pos).bounds().intersects(anchorBox)) {
-				return true;
-			}
-		}
-		return false;
+		return Cushion.wouldSurviveAt(level, EntityTypes.CUSHION.getSpawnAABB(cushionPos));
 	}
 
 	/** Whether the cushion's own cell is free (replaceable and, when checked, not already a cushion). */
