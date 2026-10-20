@@ -30,6 +30,9 @@ public final class FclConfig {
 	/** Show the planned pathfinding route as a particle line in the world. */
 	private boolean showPath = true;
 
+	/** Smoothly slide the camera from cushion to cushion while travelling. */
+	private boolean smoothCamera = true;
+
 	private final Path file;
 
 	public FclConfig() {
@@ -65,6 +68,15 @@ public final class FclConfig {
 		save();
 	}
 
+	public boolean smoothCamera() {
+		return smoothCamera;
+	}
+
+	public void setSmoothCamera(boolean value) {
+		this.smoothCamera = value;
+		save();
+	}
+
 	private void load() {
 		if (!Files.exists(file)) {
 			return;
@@ -75,6 +87,7 @@ public final class FclConfig {
 			breakBehind = Boolean.parseBoolean(props.getProperty("breakBehind", "false"));
 			autoPlace = Boolean.parseBoolean(props.getProperty("autoPlace", "false"));
 			showPath = Boolean.parseBoolean(props.getProperty("showPath", "true"));
+			smoothCamera = Boolean.parseBoolean(props.getProperty("smoothCamera", "true"));
 		} catch (IOException e) {
 			FastCushionLine.LOGGER.warn("Could not read FastCushionLine config", e);
 		}
@@ -85,6 +98,7 @@ public final class FclConfig {
 		props.setProperty("breakBehind", Boolean.toString(breakBehind));
 		props.setProperty("autoPlace", Boolean.toString(autoPlace));
 		props.setProperty("showPath", Boolean.toString(showPath));
+		props.setProperty("smoothCamera", Boolean.toString(smoothCamera));
 		try {
 			Files.createDirectories(file.getParent());
 			try (OutputStream out = Files.newOutputStream(file)) {

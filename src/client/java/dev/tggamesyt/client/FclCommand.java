@@ -16,6 +16,8 @@ import static net.fabricmc.fabric.api.client.command.v2.ClientCommands.literal;
  *   /fcl target clear         clear the target and stop
  *   /fcl breakbehind &lt;bool&gt;   break cushions left behind while travelling
  *   /fcl autoplace &lt;bool&gt;     auto-place cushions from the hotbar to extend a line
+ *   /fcl showpath &lt;bool&gt;      show the planned route as a line in the world
+ *   /fcl smoothcamera &lt;bool&gt; slide the camera smoothly between cushions
  *   /fcl stop                 stop travelling
  *   /fcl status               show current state and settings
  * </pre>
@@ -65,6 +67,14 @@ public final class FclCommand {
 											boolean v = BoolArgumentType.getBool(ctx, "value");
 											manager.config().setShowPath(v);
 											feedback(ctx.getSource(), "showPath = " + v);
+											return 1;
+										})))
+						.then(literal("smoothcamera")
+								.then(argument("value", BoolArgumentType.bool())
+										.executes(ctx -> {
+											boolean v = BoolArgumentType.getBool(ctx, "value");
+											manager.config().setSmoothCamera(v);
+											feedback(ctx.getSource(), "smoothCamera = " + v);
 											return 1;
 										})))
 						.then(literal("stop").executes(ctx -> {

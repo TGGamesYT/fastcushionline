@@ -43,6 +43,14 @@ public final class CushionPathfinder {
 	private static final double EXISTING_COST = 0.15;
 	private static final double EXISTING_RADIUS = 48.0;
 	private static final int MAX_REL = 256;           // search radius from the start (blocks)
+	// Per-hop surcharge for every block a placed spot sits *below* the start
+	// height. Dropping into a valley and climbing back out therefore costs more
+	// than staying level, so a flat route — an existing bridge, or a self-built
+	// one — is preferred over descending into a dip. It is asymmetric: rising
+	// (going over a hill) is never penalised, so this does not make it avoid
+	// high ground. A genuinely lower target is still reached; it just will not
+	// detour downward when a level alternative gets equally close.
+	private static final double DESCENT_PENALTY = 0.4;
 
 	private CushionPathfinder() {
 	}
@@ -139,7 +147,15 @@ public final class CushionPathfinder {
 					if (!CushionNav.mountReachable(eye, q, nodeRange)) {
 						continue;
 					}
-					double stepCost = isExisting ? EXISTING_COST : 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0);
+					double stepCost;
+					if (isExisting) {
+						// Riding an existing line is cheap regardless of height — if the
+						// player built it down into a dip, follow it rather than fight it.
+						stepCost = EXISTING_COST;
+					} else {
+						stepCost = 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0)
+								+ DESCENT_PENALTY * Math.max(0, startBy - qy);
+					}
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
 					Node nb = nodes.get(k);

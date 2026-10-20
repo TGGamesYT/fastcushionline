@@ -59,10 +59,11 @@ cushion line** over placing a parallel one beside it.
 | `/fcl breakbehind <true\|false>` | Break each cushion as you leave it (reclaims the item and prevents re-use of the line behind you). |
 | `/fcl autoplace <true\|false>` | When a line would end, auto-place cushions from your hotbar to continue it, keeping the line's overall heading. |
 | `/fcl showpath <true\|false>` | Show the planned route as a coloured line rendered in the world (on by default). Cyan = the planned route, green = the immediate next hop. |
+| `/fcl smoothcamera <true\|false>` | Slide the camera smoothly from cushion to cushion while travelling instead of snapping (on by default). |
 | `/fcl stop` | Stop travelling and clear any target. |
 | `/fcl status` | Show current state and settings. |
 
-Settings (`breakbehind`, `autoplace`, `showpath`) persist in
+Settings (`breakbehind`, `autoplace`, `showpath`, `smoothcamera`) persist in
 `config/fastcushionline.properties`.
 
 ### Pathfinding & auto-placement details
@@ -70,12 +71,17 @@ Settings (`breakbehind`, `autoplace`, `showpath`) persist in
 * **Toward a target**, routing is a bounded **A\* search** over reachable cushion
   spots whose cost is essentially the number of hops, so it takes the **fewest-hop
   route** — straight over a hill, onto an existing bridge, or across a short
-  self-built one — rather than a long detour. The chosen path is followed
-  node-by-node (a sticky cursor, not re-derived every hop) so it can't oscillate,
-  and it's only recomputed when the next node goes out of reach. It keeps going
-  until it reaches the target or genuinely can't get any closer, and a progress
-  watchdog stops it if it stalls. The route is drawn in the world as a line
-  (toggle with `/fcl showpath`).
+  self-built one — rather than a long detour. It also **prefers staying level**:
+  dropping below your starting height carries a small per-hop surcharge, so it
+  bridges across a dip (or rides a bridge already there) instead of diving down
+  into the valley and climbing back out, while still being free to rise over high
+  ground. The chosen path is followed node-by-node (a sticky cursor, not
+  re-derived every hop) and an anti-backtrack ratchet keeps it from ever hopping
+  to a spot farther from the target than the best it has reached, so it can't
+  oscillate between two cushions; it's only recomputed when the next node goes out
+  of reach. It keeps going until it reaches the target or genuinely can't get any
+  closer, and a progress watchdog stops it if it stalls. The route is drawn in the
+  world as a line (toggle with `/fcl showpath`).
 * With **break-behind** on, cushions the mod placed are also cleaned up when they
   fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the
@@ -86,7 +92,8 @@ Settings (`breakbehind`, `autoplace`, `showpath`) persist in
   no other cushion may already occupy it.
 * Cushions are placed and mounted **one at a time** — it commits to sitting on
   the cushion it just placed before planning the next, so it never scatters a
-  pile of unused cushions.
+  pile of unused cushions. When you set a target while standing, it mounts a
+  reachable cushion first and only lays a starter cushion if none is in reach.
 * **Gap bridging:** if there is no supported spot ahead at all (e.g. a gap
   between two cliffs), and you have ordinary blocks in your hotbar, it will
   place a support block and then a cushion on top to cross. This is only a

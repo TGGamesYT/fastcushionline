@@ -3,6 +3,7 @@
 	"package": "dev.tggamesyt.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"CameraSmoothMixin",
 		"LevelRendererGizmoMixin"
 	],
 	"injectors": {

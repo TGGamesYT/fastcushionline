@@ -95,6 +95,20 @@ public final class CushionTravelManager {
 	private static final int TARGET_STALL = 200;
 	private double closestToTarget = Double.MAX_VALUE;
 	private int noProgressTicks = 0;
+	// Anti-backtrack ratchet: the smallest target distance any cushion we have
+	// committed to has had. The greedy selectors never hop to something farther
+	// from the target than this (minus a margin), so travel can't bounce back and
+	// forth between two cushions while the planned route points forward.
+	private double committedTargetDist = Double.MAX_VALUE;
+
+	// Smooth-camera slide. The camera's visual anchor eases toward the real seat
+	// (current cushion) each tick; the render mixin reads cameraSlideOffset() to
+	// shift the camera by (visual - real), so it glides between cushions instead
+	// of snapping. Immutable Vec3s, all touched on the client/render thread only.
+	private static final double CAM_ALPHA = 0.35; // per-tick easing toward the seat
+	private Vec3 camCur = null;        // real seat position (current cushion)
+	private Vec3 camVisual = null;     // eased visual position this tick
+	private Vec3 camVisualPrev = null; // eased visual position last tick (for render lerp)
 
 	// Path visualisation (rendered as real gizmo lines via the LevelRenderer mixin).
 	private static final int ROUTE_ARGB = 0xFF33CCFF; // cyan: the planned route
@@ -135,6 +149,11 @@ public final class CushionTravelManager {
 			if (current != null) {
 				sinceProgress = 0;  // boarding a cushion counts as progress
 				clearPending();     // completed this hop; plan the next one fresh
+				if (traveling && hasTarget) {
+					// Ratchet our best progress forward as we actually land on cushions.
+					committedTargetDist = Math.min(committedTargetDist,
+							horizDist(current.position(), targetX, targetZ));
+				}
 			}
 			lastCushion = current;
 		}
@@ -143,6 +162,8 @@ public final class CushionTravelManager {
 				&& current.position().distanceToSqr(plannedPath.get(pathCursor)) < 0.36) {
 			pathCursor++;
 		}
+
+		updateSmoothCamera(current);
 
 		if (traveling && ++sinceProgress > STUCK_LIMIT) {
 			stop("stuck");
@@ -453,11 +474,16 @@ public final class CushionTravelManager {
 	 * reach allows.
 	 */
 	private Cushion bestExistingToward(LocalPlayer player, Level level, Cushion current, Vec3 cur, double curDist) {
-		double bestDist = curDist - 0.5; // require meaningful progress toward the target
+		// Never pick something farther from the target than our best progress so
+		// far (the ratchet) — this is what stops A↔B bouncing. Require a real step
+		// of progress past it, and don't immediately hop back onto the cushion we
+		// are mid-hop leaving.
+		double floor = Math.min(curDist, committedTargetDist);
+		double bestDist = floor - 0.5;
 		Cushion best = null;
 		double radius = player.entityInteractionRange() + 2.0;
 		for (Cushion c : CushionNav.cushionsWithin(level, player.getEyePosition(), radius)) {
-			if (c == current || !c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
+			if (c == current || c == hopSource || !c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
 				continue;
 			}
 			double dd = horizDist(c.position(), targetX, targetZ);
@@ -915,6 +941,7 @@ public final class CushionTravelManager {
 		pathCursor = 1;
 		closestToTarget = Double.MAX_VALUE;
 		noProgressTicks = 0;
+		committedTargetDist = Double.MAX_VALUE;
 	}
 
 	// --------------------------------------------------------- path rendering
@@ -956,6 +983,60 @@ public final class CushionTravelManager {
 		return new Vec3(v.x, v.y + 0.4, v.z);
 	}
 
+	// --------------------------------------------------------- smooth camera
+
+	/**
+	 * Eases the camera's visual anchor toward the real seat each tick. When we hop
+	 * to a new cushion {@code camCur} jumps there while {@code camVisual} lags, so
+	 * the render offset slides the view across. Resets its state when smoothing is
+	 * off or we aren't travelling so the camera snaps back to normal.
+	 */
+	private void updateSmoothCamera(Cushion current) {
+		if (!traveling || !config.smoothCamera()) {
+			resetCamera();
+			return;
+		}
+		if (current != null) {
+			camCur = current.position();
+		}
+		if (camCur == null) {
+			return; // no seat to anchor to yet
+		}
+		if (camVisual == null) {
+			camVisual = camVisualPrev = camCur; // first frame: start docked, no slide
+			return;
+		}
+		camVisualPrev = camVisual;
+		camVisual = camVisual.lerp(camCur, CAM_ALPHA);
+	}
+
+	private void resetCamera() {
+		camCur = null;
+		camVisual = null;
+		camVisualPrev = null;
+	}
+
+	/**
+	 * The offset to add to the camera position this frame so it appears at the
+	 * eased visual anchor instead of snapping to the seat. Called from the camera
+	 * render mixin with the render partial-tick. Returns {@link Vec3#ZERO} when
+	 * there is nothing to slide (smoothing off, not travelling, or settled).
+	 */
+	public Vec3 cameraSlideOffset(float partialTick) {
+		if (!traveling || !config.smoothCamera()) {
+			return Vec3.ZERO;
+		}
+		Vec3 prev = camVisualPrev;
+		Vec3 vis = camVisual;
+		Vec3 cur = camCur;
+		if (prev == null || vis == null || cur == null) {
+			return Vec3.ZERO;
+		}
+		Vec3 interp = prev.lerp(vis, Mth.clamp(partialTick, 0.0f, 1.0f));
+		Vec3 off = interp.subtract(cur);
+		return off.lengthSqr() < 1.0e-8 ? Vec3.ZERO : off;
+	}
+
 	private Cushion pickReachableCushion(LocalPlayer player, Level level) {
 		Vec3 pos = player.position();
 		double range = player.entityInteractionRange();
@@ -965,6 +1046,14 @@ public final class CushionTravelManager {
 		for (Cushion c : near) {
 			if (!c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
 				continue;
+			}
+			if (hasTarget) {
+				double dd = horizDist(c.position(), targetX, targetZ);
+				// Don't re-seat onto a cushion well behind our best progress — that
+				// is the mid-hop bounce-back that looks like oscillation.
+				if (dd > committedTargetDist + 0.5) {
+					continue;
+				}
 			}
 			double score = hasTarget
 					? horizDist(c.position(), targetX, targetZ)
@@ -990,6 +1079,7 @@ public final class CushionTravelManager {
 		clearPending();
 		myPlaced.clear();
 		resetTargetRouting();
+		resetCamera();
 		actionBar(player, "FastCushionLine: travelling (" + reason + ")");
 	}
 
@@ -1011,6 +1101,7 @@ public final class CushionTravelManager {
 		myPlaced.clear();
 		resetTargetRouting();
 		restoreSlot();
+		resetCamera();
 		if (was && player != null) {
 			actionBar(player, "FastCushionLine: stopped (" + reason + ")");
 		}
@@ -1039,6 +1130,7 @@ public final class CushionTravelManager {
 		clearPending();
 		myPlaced.clear();
 		resetTargetRouting();
+		resetCamera();
 		sitHistory.clear();
 	}
 
@@ -1063,7 +1155,12 @@ public final class CushionTravelManager {
 			startTravel(player, current, "target " + x + ", " + z);
 			return;
 		}
-		if (config.autoPlace() && findHotbarCushionSlot(player) >= 0) {
+		// Not seated. Engage in off-seat mode and let the per-tick off-seat handler
+		// mount the nearest reachable cushion first, only placing a starter if none
+		// is in reach — so it never lays a cushion when one is already usable.
+		boolean canReach = pickReachableCushion(player, level) != null;
+		boolean canPlace = config.autoPlace() && findHotbarCushionSlot(player) >= 0;
+		if (canReach || canPlace) {
 			traveling = true;
 			lastCushion = null;
 			hopSource = null;
@@ -1074,11 +1171,7 @@ public final class CushionTravelManager {
 			clearPending();
 			myPlaced.clear();
 			resetTargetRouting();
-			CushionNav.PlacePlan starter = starterPlacement(player, level);
-			if (starter != null) {
-				placeCushion(player, starter);
-				placeCooldown = PLACE_COOLDOWN;
-			}
+			resetCamera();
 			actionBar(player, "FastCushionLine: heading to " + x + ", " + z);
 		} else {
 			actionBar(player, "Target " + x + ", " + z
@@ -1110,6 +1203,7 @@ public final class CushionTravelManager {
 		sb.append(", breakBehind=").append(config.breakBehind());
 		sb.append(", autoPlace=").append(config.autoPlace());
 		sb.append(", showPath=").append(config.showPath());
+		sb.append(", smoothCamera=").append(config.smoothCamera());
 		return sb.toString();
 	}
 
