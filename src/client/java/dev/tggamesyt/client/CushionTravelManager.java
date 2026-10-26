@@ -16,6 +16,7 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.CushionItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.SwingAnimation;
+import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
@@ -91,8 +92,14 @@ public final class CushionTravelManager {
 	private List<Vec3> plannedPath = null;
 	private int pathCursor = 1;
 	// Progress watchdog: stop if we stop getting closer to the target for a while
-	// (catches oscillation and genuine dead-ends without waiting forever).
-	private static final int TARGET_STALL = 200;
+	// (catches oscillation and genuine dead-ends without waiting forever). Kept
+	// generous so a legitimate detour down and around a big obstacle (a tree, a
+	// wall) has time to come back toward the target before we give up.
+	private static final int TARGET_STALL = 400;
+	// How far past our best approach we'll let a detour wander before giving up —
+	// a spatial backstop for the dead-end escape so it can round obstacles without
+	// roaming off across the world.
+	private static final double MAX_DETOUR = 64.0;
 	private double closestToTarget = Double.MAX_VALUE;
 	private int noProgressTicks = 0;
 	// Anti-backtrack ratchet: the smallest target distance any cushion we have
@@ -101,14 +108,15 @@ public final class CushionTravelManager {
 	// forth between two cushions while the planned route points forward.
 	private double committedTargetDist = Double.MAX_VALUE;
 
-	// Smooth-camera slide. The camera's visual anchor eases toward the real seat
-	// (current cushion) each tick; the render mixin reads cameraSlideOffset() to
-	// shift the camera by (visual - real), so it glides between cushions instead
-	// of snapping. Immutable Vec3s, all touched on the client/render thread only.
-	private static final double CAM_ALPHA = 0.35; // per-tick easing toward the seat
-	private Vec3 camCur = null;        // real seat position (current cushion)
-	private Vec3 camVisual = null;     // eased visual position this tick
-	private Vec3 camVisualPrev = null; // eased visual position last tick (for render lerp)
+	// Smooth-camera slide, done entirely at render time so it is immune to
+	// tick/packet ordering (sampling the seat in the tick caused a one-frame snap
+	// to the new cushion before the slide kicked in). Each frame the camera eases
+	// from where it is toward the real position, so a seat teleport is absorbed
+	// into a glide and can never jump ahead first. Half-life easing keeps it
+	// frame-rate independent.
+	private static final double CAM_HALF_LIFE_S = 0.12; // time to close half the gap
+	private Vec3 camSmoothed = null;
+	private long camLastNano = 0L;
 
 	// Path visualisation (rendered as real gizmo lines via the LevelRenderer mixin).
 	private static final int ROUTE_ARGB = 0xFF33CCFF; // cyan: the planned route
@@ -162,8 +170,6 @@ public final class CushionTravelManager {
 				&& current.position().distanceToSqr(plannedPath.get(pathCursor)) < 0.36) {
 			pathCursor++;
 		}
-
-		updateSmoothCamera(current);
 
 		if (traveling && ++sinceProgress > STUCK_LIMIT) {
 			stop("stuck");
@@ -425,18 +431,44 @@ public final class CushionTravelManager {
 		}
 	}
 
-	/** Target mode: follow the single planned A* route node-by-node. */
+	/** Target mode: follow the planned A* route; greedy line-reuse is only a fallback. */
 	private void advanceTarget(LocalPlayer player, Level level, Cushion current, Vec3 cur, double range) {
 		double d = horizDist(cur, targetX, targetZ);
 		if (d <= ARRIVE_DIST) {
 			stop("arrived at target");
 			return;
 		}
+		// Bound how far we'll wander away from our best approach while detouring
+		// around an obstacle, so a dead-end escape can't turn into endless roaming.
+		if (committedTargetDist != Double.MAX_VALUE && d > committedTargetDist + MAX_DETOUR) {
+			stop(String.format("gave up detouring (%.0f blocks off the best approach)",
+					d - committedTargetDist));
+			return;
+		}
 
-		// Reuse existing cushions first: hop directly to whichever reachable
-		// cushion gets closest to the target. This is what makes it ride the line
-		// it's already on (or one it just placed) instead of laying a parallel
-		// one beside it, and it needs no placement, so it's the fastest option.
+		boolean canPlace = config.autoPlace() && hasCushionAvailable(player);
+		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
+
+		// Follow the sticky A* route first. It already prefers existing lines (so it
+		// still rides a line rather than laying a parallel one) and can route down
+		// or around obstacles, so greedy reuse must not pre-empt it — otherwise a
+		// cushion that happens to be nearer the target (e.g. back up a tree we are
+		// escaping) would keep yanking us off the route.
+		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
+		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge);
+		if (node != null) {
+			Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
+			if (existing == null && !canPlace) {
+				stop("no cushions to build toward the target");
+				return;
+			}
+			if (stepToward(player, level, current, player.getEyePosition(), range, node)) {
+				return;
+			}
+			plannedPath = null; // couldn't act on this node — replan next tick
+		}
+
+		// Fallback: hop to the reachable existing cushion closest to the target.
 		Cushion reuse = bestExistingToward(player, level, current, cur, d);
 		if (reuse != null) {
 			hopSource = current;
@@ -445,25 +477,8 @@ public final class CushionTravelManager {
 			mountCushion(player, reuse);
 			return;
 		}
-
-		boolean canPlace = config.autoPlace() && findHotbarCushionSlot(player) >= 0;
-		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
-
-		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
-		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge);
 		if (node == null) {
 			stop(String.format("stopped %.0f blocks from target (no route)", d));
-			return;
-		}
-		Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
-		if (existing == null && !canPlace) {
-			stop("no cushions in the hotbar to build toward the target");
-			return;
-		}
-		if (!stepToward(player, level, current, player.getEyePosition(), range, node)) {
-			// Couldn't act on this node — force a fresh plan next tick. The
-			// progress watchdog stops us if we truly can't get closer.
-			plannedPath = null;
 		}
 	}
 
@@ -522,7 +537,7 @@ public final class CushionTravelManager {
 		if (plannedPath != null && pathCursor < plannedPath.size()) {
 			Vec3 node = plannedPath.get(pathCursor);
 			if (CushionNav.mountReachable(eye, node, range)) {
-				return node;
+				return skipAheadAlongExisting(level, eye, range);
 			}
 		}
 		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, blockRange, canBridge);
@@ -540,7 +555,30 @@ public final class CushionTravelManager {
 			return null;
 		}
 		Vec3 node = plannedPath.get(pathCursor);
-		return CushionNav.mountReachable(eye, node, range) ? node : null;
+		if (!CushionNav.mountReachable(eye, node, range)) {
+			return null;
+		}
+		return skipAheadAlongExisting(level, eye, range);
+	}
+
+	/**
+	 * Advances the path cursor over consecutive reachable nodes that already have a
+	 * cushion, returning the farthest one — so along an existing line it hops as
+	 * far as reach allows in one go instead of one cushion at a time. Stops at the
+	 * first node that still needs placing, since those are built one at a time.
+	 */
+	private Vec3 skipAheadAlongExisting(Level level, Vec3 eye, double range) {
+		int probe = pathCursor;
+		while (probe + 1 < plannedPath.size()) {
+			Vec3 next = plannedPath.get(probe + 1);
+			if (!CushionNav.mountReachable(eye, next, range)
+					|| CushionNav.cushionAt(level, next, MOUNT_MATCH_EPS) == null) {
+				break;
+			}
+			probe++;
+		}
+		pathCursor = probe;
+		return plannedPath.get(pathCursor);
 	}
 
 	/** Mount the cushion at {@code node}, or (with autoplace) place / bridge one there. */
@@ -556,7 +594,7 @@ public final class CushionTravelManager {
 			}
 			return false;
 		}
-		if (!config.autoPlace() || findHotbarCushionSlot(player) < 0 || !CushionNav.mountReachable(eye, node, range)) {
+		if (!config.autoPlace() || !hasCushionAvailable(player) || !CushionNav.mountReachable(eye, node, range)) {
 			return false;
 		}
 		BlockPos support = CushionNav.supportBlock(node);
@@ -580,7 +618,7 @@ public final class CushionTravelManager {
 	 * @return true if a cushion or a bridging block was placed this tick.
 	 */
 	private boolean tryPlaceLine(LocalPlayer player, Level level, Vec3 cur, double range) {
-		if (findHotbarCushionSlot(player) < 0) {
+		if (!hasCushionAvailable(player)) {
 			return false; // no cushions to place
 		}
 		Vec3 eye = player.getEyePosition();
@@ -814,9 +852,9 @@ public final class CushionTravelManager {
 		if (mc.gameMode == null) {
 			return false;
 		}
-		int slot = findHotbarCushionSlot(player);
+		int slot = ensureCushionInHotbar(player);
 		if (slot < 0) {
-			return false; // no cushions available in the hotbar
+			return false; // no cushions available anywhere
 		}
 		Inventory inv = player.getInventory();
 		if (savedSlot < 0) {
@@ -917,6 +955,70 @@ public final class CushionTravelManager {
 		return -1;
 	}
 
+	/** True if the player has a cushion in the hotbar or anywhere in the main inventory. */
+	private boolean hasCushionAvailable(LocalPlayer player) {
+		Inventory inv = player.getInventory();
+		for (int i = 0; i < 36; i++) {
+			ItemStack stack = inv.getItem(i);
+			if (!stack.isEmpty() && stack.getItem() instanceof CushionItem) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A hotbar slot holding a cushion, pulling one in from the main inventory (a
+	 * number-key style swap) if the hotbar has none. Prefers an empty hotbar slot
+	 * so nothing the player is holding gets displaced; falls back to the selected
+	 * slot only if the hotbar is full. Returns -1 only when there are no cushions
+	 * at all.
+	 */
+	private int ensureCushionInHotbar(LocalPlayer player) {
+		int slot = findHotbarCushionSlot(player);
+		if (slot >= 0) {
+			return slot;
+		}
+		Inventory inv = player.getInventory();
+		int hotbar = Inventory.getSelectionSize();
+		int source = -1;
+		for (int i = hotbar; i < 36; i++) { // main inventory, above the hotbar
+			ItemStack stack = inv.getItem(i);
+			if (!stack.isEmpty() && stack.getItem() instanceof CushionItem) {
+				source = i;
+				break;
+			}
+		}
+		if (source < 0) {
+			return -1; // none anywhere
+		}
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.gameMode == null) {
+			return -1;
+		}
+		int target = firstEmptyHotbarSlot(player);
+		if (target < 0) {
+			target = inv.getSelectedSlot();
+		}
+		// In the player inventory menu the main-inventory indices map 1:1 to menu
+		// slots, so the source Inventory index is also its menu slot. SWAP exchanges
+		// it with hotbar slot `target`, exactly like pressing that number key.
+		mc.gameMode.handleContainerInput(player.inventoryMenu.containerId, source, target,
+				ContainerInput.SWAP, player);
+		return findHotbarCushionSlot(player);
+	}
+
+	private int firstEmptyHotbarSlot(LocalPlayer player) {
+		Inventory inv = player.getInventory();
+		int hotbar = Inventory.getSelectionSize();
+		for (int i = 0; i < hotbar; i++) {
+			if (inv.getItem(i).isEmpty()) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
 	/** First hotbar slot holding a placeable block (cushions place entities, not blocks, so they are skipped). */
 	private int findHotbarBlockSlot(LocalPlayer player) {
 		Inventory inv = player.getInventory();
@@ -986,55 +1088,49 @@ public final class CushionTravelManager {
 	// --------------------------------------------------------- smooth camera
 
 	/**
-	 * Eases the camera's visual anchor toward the real seat each tick. When we hop
-	 * to a new cushion {@code camCur} jumps there while {@code camVisual} lags, so
-	 * the render offset slides the view across. Resets its state when smoothing is
-	 * off or we aren't travelling so the camera snaps back to normal.
+	 * Eases the camera position toward its real (vanilla-computed) value, called
+	 * from the camera render mixin with the freshly computed position. Returns the
+	 * eased position to render at; when a hop teleports the real position the eased
+	 * one lags and catches up over ~{@link #CAM_HALF_LIFE_S}, so the view glides
+	 * cushion to cushion. Returns {@code realPos} unchanged (same instance) when
+	 * there is nothing to smooth, so the mixin can skip the write.
 	 */
-	private void updateSmoothCamera(Cushion current) {
+	public Vec3 smoothCameraPosition(Vec3 realPos) {
 		if (!traveling || !config.smoothCamera()) {
-			resetCamera();
-			return;
+			camSmoothed = null;
+			camLastNano = 0L;
+			return realPos;
 		}
-		if (current != null) {
-			camCur = current.position();
+		long now = System.nanoTime();
+		if (camSmoothed == null || camLastNano == 0L) {
+			camSmoothed = realPos;
+			camLastNano = now;
+			return realPos;
 		}
-		if (camCur == null) {
-			return; // no seat to anchor to yet
+		double dt = (now - camLastNano) / 1.0e9;
+		camLastNano = now;
+		if (dt <= 0.0) {
+			return camSmoothed;
 		}
-		if (camVisual == null) {
-			camVisual = camVisualPrev = camCur; // first frame: start docked, no slide
-			return;
+		if (dt > 0.25) {
+			// A long frame/pause (alt-tab, lag spike): don't lurch, just re-dock.
+			camSmoothed = realPos;
+			return realPos;
 		}
-		camVisualPrev = camVisual;
-		camVisual = camVisual.lerp(camCur, CAM_ALPHA);
+		double a = 1.0 - Math.pow(0.5, dt / CAM_HALF_LIFE_S);
+		Vec3 eased = camSmoothed.lerp(realPos, a);
+		// Guard against teleports we should never smooth across (respawn, /tp,
+		// dimension change): if we're absurdly far, snap.
+		if (eased.distanceToSqr(realPos) > 64.0 * 64.0) {
+			eased = realPos;
+		}
+		camSmoothed = eased;
+		return eased;
 	}
 
 	private void resetCamera() {
-		camCur = null;
-		camVisual = null;
-		camVisualPrev = null;
-	}
-
-	/**
-	 * The offset to add to the camera position this frame so it appears at the
-	 * eased visual anchor instead of snapping to the seat. Called from the camera
-	 * render mixin with the render partial-tick. Returns {@link Vec3#ZERO} when
-	 * there is nothing to slide (smoothing off, not travelling, or settled).
-	 */
-	public Vec3 cameraSlideOffset(float partialTick) {
-		if (!traveling || !config.smoothCamera()) {
-			return Vec3.ZERO;
-		}
-		Vec3 prev = camVisualPrev;
-		Vec3 vis = camVisual;
-		Vec3 cur = camCur;
-		if (prev == null || vis == null || cur == null) {
-			return Vec3.ZERO;
-		}
-		Vec3 interp = prev.lerp(vis, Mth.clamp(partialTick, 0.0f, 1.0f));
-		Vec3 off = interp.subtract(cur);
-		return off.lengthSqr() < 1.0e-8 ? Vec3.ZERO : off;
+		camSmoothed = null;
+		camLastNano = 0L;
 	}
 
 	private Cushion pickReachableCushion(LocalPlayer player, Level level) {
@@ -1159,7 +1255,7 @@ public final class CushionTravelManager {
 		// mount the nearest reachable cushion first, only placing a starter if none
 		// is in reach — so it never lays a cushion when one is already usable.
 		boolean canReach = pickReachableCushion(player, level) != null;
-		boolean canPlace = config.autoPlace() && findHotbarCushionSlot(player) >= 0;
+		boolean canPlace = config.autoPlace() && hasCushionAvailable(player);
 		if (canReach || canPlace) {
 			traveling = true;
 			lastCushion = null;

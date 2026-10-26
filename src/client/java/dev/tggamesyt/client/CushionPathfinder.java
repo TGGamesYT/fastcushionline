@@ -51,6 +51,11 @@ public final class CushionPathfinder {
 	// high ground. A genuinely lower target is still reached; it just will not
 	// detour downward when a level alternative gets equally close.
 	private static final double DESCENT_PENALTY = 0.4;
+	// A gentler surcharge for climbing *above* the start height, so it prefers a
+	// level route and won't needlessly clamber onto trees/ledges — but it is small
+	// enough that going over a hill (a few blocks up) still beats a long detour
+	// around it, which was the behaviour we want to keep.
+	private static final double CLIMB_PENALTY = 0.2;
 
 	private CushionPathfinder() {
 	}
@@ -154,7 +159,8 @@ public final class CushionPathfinder {
 						stepCost = EXISTING_COST;
 					} else {
 						stepCost = 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0)
-								+ DESCENT_PENALTY * Math.max(0, startBy - qy);
+								+ DESCENT_PENALTY * Math.max(0, startBy - qy)
+								+ CLIMB_PENALTY * Math.max(0, qy - startBy);
 					}
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
@@ -176,7 +182,27 @@ public final class CushionPathfinder {
 		}
 
 		if (best == startNode || best.parent == null) {
-			return null; // could not take a single step
+			// Boxed in / sitting on a local optimum (e.g. up a tree): don't give up.
+			// Pick the most promising reachable spot we found — nearest the target,
+			// breaking ties toward cheaper-to-reach ones — even though it's farther
+			// than here, so travel steps down/around and re-plans from there instead
+			// of stopping dead. The manager bounds how far it will detour this way.
+			Node escape = null;
+			double escapeScore = Double.MAX_VALUE;
+			for (Node n : nodes.values()) {
+				if (n == startNode || n.parent == null) {
+					continue;
+				}
+				double score = horiz(n.pos, targetX, targetZ) + 0.5 * n.g;
+				if (score < escapeScore) {
+					escapeScore = score;
+					escape = n;
+				}
+			}
+			if (escape == null) {
+				return null; // genuinely could not take a single step
+			}
+			best = escape;
 		}
 		List<Vec3> path = new ArrayList<>();
 		for (Node n = best; n != null; n = n.parent) {

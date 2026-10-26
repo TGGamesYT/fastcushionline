@@ -57,7 +57,7 @@ cushion line** over placing a parallel one beside it.
 | `/fcl target <x> <z>` | Pathfind toward these X/Z coordinates. If you have `autoplace` on and cushions in your hotbar it will place a line for you; if a nearby cushion line already gets you closer, it uses that instead. |
 | `/fcl target clear` | Clear the target and stop. |
 | `/fcl breakbehind <true\|false>` | Break each cushion as you leave it (reclaims the item and prevents re-use of the line behind you). |
-| `/fcl autoplace <true\|false>` | When a line would end, auto-place cushions from your hotbar to continue it, keeping the line's overall heading. |
+| `/fcl autoplace <true\|false>` | When a line would end, auto-place cushions to continue it or to reach a target, keeping the line's overall heading. Pulls cushions from your inventory into the hotbar automatically if the hotbar has none. |
 | `/fcl showpath <true\|false>` | Show the planned route as a coloured line rendered in the world (on by default). Cyan = the planned route, green = the immediate next hop. |
 | `/fcl smoothcamera <true\|false>` | Slide the camera smoothly from cushion to cushion while travelling instead of snapping (on by default). |
 | `/fcl stop` | Stop travelling and clear any target. |
@@ -79,9 +79,11 @@ Settings (`breakbehind`, `autoplace`, `showpath`, `smoothcamera`) persist in
   re-derived every hop) and an anti-backtrack ratchet keeps it from ever hopping
   to a spot farther from the target than the best it has reached, so it can't
   oscillate between two cushions; it's only recomputed when the next node goes out
-  of reach. It keeps going until it reaches the target or genuinely can't get any
-  closer, and a progress watchdog stops it if it stalls. The route is drawn in the
-  world as a line (toggle with `/fcl showpath`).
+  of reach. If it runs into a dead-end — climbs onto a tree or up to a ledge with
+  nowhere to go — it routes back down and around rather than stopping, bounded so
+  it won't roam far off course. It keeps going until it reaches the target or
+  genuinely can't get any closer, and a progress watchdog stops it if it stalls.
+  The route is drawn in the world as a line (toggle with `/fcl showpath`).
 * With **break-behind** on, cushions the mod placed are also cleaned up when they
   fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the
