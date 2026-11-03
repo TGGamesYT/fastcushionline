@@ -25,8 +25,10 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Drives the whole "sit-hop" fast-travel behaviour. Runs once per client tick.
@@ -59,6 +61,8 @@ public final class CushionTravelManager {
 	private static final double MOUNT_MATCH_EPS = 0.4;
 	private static final int VERT_WINDOW = 5;     // how far up/down to look for a surface
 	private static final double ARRIVE_DIST = 1.5;
+	// Air (out of ~300) left before we bail out of the water to avoid drowning.
+	private static final int DROWN_AIR_BAILOUT = 40;
 
 	private final FclConfig config;
 
@@ -91,6 +95,10 @@ public final class CushionTravelManager {
 	// next node is no longer reachable.
 	private List<Vec3> plannedPath = null;
 	private int pathCursor = 1;
+	// Cushion cells found to be dead-ends this trip (packed BlockPos longs). The
+	// pathfinder avoids routing back onto them, so once we escape a dead-end (a
+	// tree top, a ledge) we go around instead of bouncing straight back into it.
+	private final Set<Long> deadEnds = new HashSet<>();
 	// Progress watchdog: stop if we stop getting closer to the target for a while
 	// (catches oscillation and genuine dead-ends without waiting forever). Kept
 	// generous so a legitimate detour down and around a big obstacle (a tree, a
@@ -226,11 +234,35 @@ public final class CushionTravelManager {
 			stop("you got up");
 			return;
 		}
+		if (checkDrowning(player, current)) {
+			return; // bailed out of the water to breathe
+		}
 		if (placeCooldown > 0) {
 			placeCooldown--;
 			return;
 		}
 		advance(player, level, current);
+	}
+
+	/**
+	 * Last-resort safeguard: if we're seated underwater in survival and air is
+	 * about to run out — i.e. the route led into water with no quick way out — drop
+	 * the player off the cushion so they can surface and breathe, and stop, rather
+	 * than letting them drown. In creative (no air drain) this never triggers.
+	 */
+	private boolean checkDrowning(LocalPlayer player, Cushion current) {
+		if (player.isCreative() || player.getAbilities().invulnerable || !player.isUnderWater()) {
+			return false;
+		}
+		if (player.getAirSupply() > DROWN_AIR_BAILOUT) {
+			return false;
+		}
+		// Break the cushion we're on to dismount (water will float the player up).
+		if (current.isAlive() && player.isWithinEntityInteractionRange(current, 1.0)) {
+			breakCushion(player, current);
+		}
+		stop("surfacing — you were about to drown");
+		return true;
 	}
 
 	/** Not on a cushion: either recover by mounting a reachable one, or give up. */
@@ -540,7 +572,8 @@ public final class CushionTravelManager {
 				return skipAheadAlongExisting(level, eye, range);
 			}
 		}
-		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, blockRange, canBridge);
+		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, blockRange,
+				canBridge, deadEnds);
 		if (path == null || path.size() < 2) {
 			plannedPath = null;
 			return null;
@@ -1044,6 +1077,7 @@ public final class CushionTravelManager {
 		closestToTarget = Double.MAX_VALUE;
 		noProgressTicks = 0;
 		committedTargetDist = Double.MAX_VALUE;
+		deadEnds.clear();
 	}
 
 	// --------------------------------------------------------- path rendering

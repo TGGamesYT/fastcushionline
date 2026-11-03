@@ -70,20 +70,26 @@ Settings (`breakbehind`, `autoplace`, `showpath`, `smoothcamera`) persist in
 
 * **Toward a target**, routing is a bounded **A\* search** over reachable cushion
   spots whose cost is essentially the number of hops, so it takes the **fewest-hop
-  route** — straight over a hill, onto an existing bridge, or across a short
-  self-built one — rather than a long detour. It also **prefers staying level**:
-  dropping below your starting height carries a small per-hop surcharge, so it
-  bridges across a dip (or rides a bridge already there) instead of diving down
-  into the valley and climbing back out, while still being free to rise over high
-  ground. The chosen path is followed node-by-node (a sticky cursor, not
-  re-derived every hop) and an anti-backtrack ratchet keeps it from ever hopping
-  to a spot farther from the target than the best it has reached, so it can't
-  oscillate between two cushions; it's only recomputed when the next node goes out
-  of reach. If it runs into a dead-end — climbs onto a tree or up to a ledge with
-  nowhere to go — it routes back down and around rather than stopping, bounded so
-  it won't roam far off course. It keeps going until it reaches the target or
+  route** — up and over a hill or mountain, onto an existing bridge, or across a
+  short self-built one — rather than a long detour. Climbing is free, so it will
+  go over high ground instead of around it, but **dropping below your starting
+  height** carries a small per-hop surcharge, so it bridges across a dip (or rides
+  a bridge already there) rather than diving into a valley and climbing back out.
+  It strongly prefers **reusing an existing line** (including one it placed
+  earlier) over laying a fresh one beside it, matching cushions even when they
+  rest on slabs or paths at a fractional height. The chosen path is followed
+  node-by-node (a sticky cursor, not re-derived every hop) and an anti-backtrack
+  ratchet keeps it from hopping to a spot farther from the target than the best it
+  has reached, so it can't oscillate between two cushions; it's only recomputed
+  when the next node goes out of reach. If it hits a dead-end — climbs onto a tree
+  or a ledge with nowhere to continue — it steps back down and around, **remembers
+  that spot for the rest of the trip** so it won't bounce straight back into it,
+  and bounds how far it will detour. It keeps going until it reaches the target or
   genuinely can't get any closer, and a progress watchdog stops it if it stalls.
   The route is drawn in the world as a line (toggle with `/fcl showpath`).
+* **Drowning safeguard:** travelling in survival, if the route leaves you seated
+  underwater with your air almost gone and no quick way out, it drops you off the
+  cushion so you can surface, and stops — it won't let you drown.
 * With **break-behind** on, cushions the mod placed are also cleaned up when they
   fall behind you or are left over from an abandoned path attempt.
 * **Continuing an existing line** (auto-place with no target), it reuses the

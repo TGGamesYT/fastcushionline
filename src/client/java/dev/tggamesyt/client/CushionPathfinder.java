@@ -46,16 +46,10 @@ public final class CushionPathfinder {
 	// Per-hop surcharge for every block a placed spot sits *below* the start
 	// height. Dropping into a valley and climbing back out therefore costs more
 	// than staying level, so a flat route — an existing bridge, or a self-built
-	// one — is preferred over descending into a dip. It is asymmetric: rising
-	// (going over a hill) is never penalised, so this does not make it avoid
-	// high ground. A genuinely lower target is still reached; it just will not
-	// detour downward when a level alternative gets equally close.
+	// one — is preferred over descending into a dip. It is asymmetric: rising is
+	// NOT penalised, so going up and over a hill or mountain is free and preferred
+	// to a long way around; only a genuinely lower target makes it descend.
 	private static final double DESCENT_PENALTY = 0.4;
-	// A gentler surcharge for climbing *above* the start height, so it prefers a
-	// level route and won't needlessly clamber onto trees/ledges — but it is small
-	// enough that going over a hill (a few blocks up) still beats a long detour
-	// around it, which was the behaviour we want to keep.
-	private static final double CLIMB_PENALTY = 0.2;
 
 	private CushionPathfinder() {
 	}
@@ -67,7 +61,7 @@ public final class CushionPathfinder {
 	 *         if not a single neighbouring spot is reachable.
 	 */
 	public static List<Vec3> plan(Level level, Vec3 start, Vec3 eyeOffset, double targetX, double targetZ,
-			double entityRange, double blockRange, boolean allowBridge) {
+			double entityRange, double blockRange, boolean allowBridge, Set<Long> deadEnds) {
 		// Mounting an existing cushion only needs entity-interaction range; placing
 		// a new one also needs to reach the support block, so it is limited by
 		// whichever of the two ranges is smaller.
@@ -78,10 +72,19 @@ public final class CushionPathfinder {
 		int startBz = Mth.floor(start.z);
 
 		// Snapshot existing cushions once so we can prefer reusing a line over
-		// placing a parallel one (checked per node, not per neighbour scan).
+		// placing a parallel one (checked per node, not per neighbour scan). A
+		// cushion resting on a non-full block (slab, path, farmland) sits at a
+		// fractional height, so its floored Y can be a block off the integer cell
+		// A* would pick for that column — record ±1 so reuse still matches instead
+		// of laying a fresh line beside it.
 		Set<Long> existing = new HashSet<>();
 		for (Cushion c : CushionNav.cushionsWithin(level, start, EXISTING_RADIUS)) {
-			existing.add(BlockPos.containing(c.position()).asLong());
+			int cx = Mth.floor(c.position().x);
+			int cy = Mth.floor(c.position().y);
+			int cz = Mth.floor(c.position().z);
+			existing.add(BlockPos.asLong(cx, cy - 1, cz));
+			existing.add(BlockPos.asLong(cx, cy, cz));
+			existing.add(BlockPos.asLong(cx, cy + 1, cz));
 		}
 
 		Map<Long, Node> nodes = new HashMap<>();
@@ -147,6 +150,11 @@ public final class CushionPathfinder {
 					if (Math.abs(qy - startBy) > MAX_REL) {
 						continue;
 					}
+					// Skip spots we've learned are dead-ends this trip, so we route
+					// around them instead of climbing back into the one we just fled.
+					if (deadEnds != null && deadEnds.contains(BlockPos.asLong(nbx, qy, nbz))) {
+						continue;
+					}
 					boolean isExisting = existing.contains(BlockPos.asLong(nbx, qy, nbz));
 					double nodeRange = isExisting ? entityRange : placeRange;
 					if (!CushionNav.mountReachable(eye, q, nodeRange)) {
@@ -159,8 +167,7 @@ public final class CushionPathfinder {
 						stepCost = EXISTING_COST;
 					} else {
 						stepCost = 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0)
-								+ DESCENT_PENALTY * Math.max(0, startBy - qy)
-								+ CLIMB_PENALTY * Math.max(0, qy - startBy);
+								+ DESCENT_PENALTY * Math.max(0, startBy - qy);
 					}
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
@@ -201,6 +208,12 @@ public final class CushionPathfinder {
 			}
 			if (escape == null) {
 				return null; // genuinely could not take a single step
+			}
+			// We're on a dead-end (couldn't get any closer from here). Remember it so
+			// the next plan — made once we've stepped off — won't route straight back
+			// onto it, which is what caused the back-and-forth stall.
+			if (deadEnds != null) {
+				deadEnds.add(BlockPos.asLong(startBx, startBy, startBz));
 			}
 			best = escape;
 		}
