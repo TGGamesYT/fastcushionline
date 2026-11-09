@@ -487,7 +487,7 @@ public final class CushionTravelManager {
 		// cushion that happens to be nearer the target (e.g. back up a tree we are
 		// escaping) would keep yanking us off the route.
 		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
-		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge);
+		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge, canPlace);
 		if (node != null) {
 			Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
 			if (existing == null && !canPlace) {
@@ -564,7 +564,7 @@ public final class CushionTravelManager {
 	 * the path is missing/finished or its next node is out of reach.
 	 */
 	private Vec3 targetNextNode(Level level, Vec3 cur, Vec3 eyeOffset, double range, double blockRange,
-			boolean canBridge) {
+			boolean canBridge, boolean canPlace) {
 		Vec3 eye = cur.add(eyeOffset);
 		if (plannedPath != null && pathCursor < plannedPath.size()) {
 			Vec3 node = plannedPath.get(pathCursor);
@@ -573,7 +573,7 @@ public final class CushionTravelManager {
 			}
 		}
 		List<Vec3> path = CushionPathfinder.plan(level, cur, eyeOffset, targetX, targetZ, range, blockRange,
-				canBridge, deadEnds);
+				canBridge, canPlace, deadEnds);
 		if (path == null || path.size() < 2) {
 			plannedPath = null;
 			return null;

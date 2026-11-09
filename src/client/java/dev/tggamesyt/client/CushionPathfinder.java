@@ -9,7 +9,6 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -61,7 +60,8 @@ public final class CushionPathfinder {
 	 *         if not a single neighbouring spot is reachable.
 	 */
 	public static List<Vec3> plan(Level level, Vec3 start, Vec3 eyeOffset, double targetX, double targetZ,
-			double entityRange, double blockRange, boolean allowBridge, Set<Long> deadEnds) {
+			double entityRange, double blockRange, boolean allowBridge, boolean placementAllowed,
+			Set<Long> deadEnds) {
 		// Mounting an existing cushion only needs entity-interaction range; placing
 		// a new one also needs to reach the support block, so it is limited by
 		// whichever of the two ranges is smaller.
@@ -71,20 +71,16 @@ public final class CushionPathfinder {
 		int startBy = Mth.floor(start.y);
 		int startBz = Mth.floor(start.z);
 
-		// Snapshot existing cushions once so we can prefer reusing a line over
-		// placing a parallel one (checked per node, not per neighbour scan). A
-		// cushion resting on a non-full block (slab, path, farmland) sits at a
-		// fractional height, so its floored Y can be a block off the integer cell
-		// A* would pick for that column — record ±1 so reuse still matches instead
-		// of laying a fresh line beside it.
-		Set<Long> existing = new HashSet<>();
+		// Snapshot existing cushions by column at their ACTUAL height. They're
+		// seeded as nodes directly (below), so a line is routable and reusable no
+		// matter what it rests on — including cushions on slabs/paths/farmland that
+		// sit at a fractional height the integer surface scan would never land on
+		// (the old cause of it laying a fresh line beside one it already placed).
+		Map<Long, List<Double>> existingCol = new HashMap<>();
 		for (Cushion c : CushionNav.cushionsWithin(level, start, EXISTING_RADIUS)) {
 			int cx = Mth.floor(c.position().x);
-			int cy = Mth.floor(c.position().y);
 			int cz = Mth.floor(c.position().z);
-			existing.add(BlockPos.asLong(cx, cy - 1, cz));
-			existing.add(BlockPos.asLong(cx, cy, cz));
-			existing.add(BlockPos.asLong(cx, cy + 1, cz));
+			existingCol.computeIfAbsent(col(cx, cz), k -> new ArrayList<>()).add(c.position().y);
 		}
 
 		Map<Long, Node> nodes = new HashMap<>();
@@ -135,17 +131,38 @@ public final class CushionPathfinder {
 					if (Math.abs(nbx - startBx) > MAX_REL || Math.abs(nbz - startBz) > MAX_REL) {
 						continue;
 					}
-					int curY = Mth.floor(cur.pos.y);
-					long memoKey = key(nbx, curY, nbz, startBx, startBy, startBz);
-					Cell cell = columnMemo.get(memoKey);
-					if (cell == null) {
-						cell = computeCell(level, nbx, nbz, cur.pos.y, allowBridge);
-						columnMemo.put(memoKey, cell);
+
+					// Prefer hopping onto an existing cushion in this column (at its
+					// real height, whatever it rests on); only consider placing a new
+					// one when placement is allowed (auto-place on and cushions to hand).
+					Vec3 q;
+					boolean nodeExisting;
+					boolean bridged = false;
+					Vec3 existNode = nearestExistingInColumn(existingCol, nbx, nbz, cur.pos.y);
+					if (existNode != null && CushionNav.mountReachable(eye, existNode, entityRange)) {
+						q = existNode;
+						nodeExisting = true;
+					} else if (placementAllowed) {
+						int curY = Mth.floor(cur.pos.y);
+						long memoKey = key(nbx, curY, nbz, startBx, startBy, startBz);
+						Cell cell = columnMemo.get(memoKey);
+						if (cell == null) {
+							cell = computeCell(level, nbx, nbz, cur.pos.y, allowBridge);
+							columnMemo.put(memoKey, cell);
+						}
+						if (cell.pos == null) {
+							continue;
+						}
+						q = cell.pos;
+						nodeExisting = false;
+						bridged = cell.bridged;
+						if (!CushionNav.mountReachable(eye, q, placeRange)) {
+							continue;
+						}
+					} else {
+						continue; // can't place here and no existing cushion to ride
 					}
-					Vec3 q = cell.pos;
-					if (q == null) {
-						continue;
-					}
+
 					int qy = Mth.floor(q.y);
 					if (Math.abs(qy - startBy) > MAX_REL) {
 						continue;
@@ -155,18 +172,15 @@ public final class CushionPathfinder {
 					if (deadEnds != null && deadEnds.contains(BlockPos.asLong(nbx, qy, nbz))) {
 						continue;
 					}
-					boolean isExisting = existing.contains(BlockPos.asLong(nbx, qy, nbz));
-					double nodeRange = isExisting ? entityRange : placeRange;
-					if (!CushionNav.mountReachable(eye, q, nodeRange)) {
-						continue;
-					}
 					double stepCost;
-					if (isExisting) {
-						// Riding an existing line is cheap regardless of height — if the
-						// player built it down into a dip, follow it rather than fight it.
+					if (nodeExisting) {
+						// Riding an existing cushion is far cheaper than placing one
+						// (no place-then-mount), so it sticks to a line as long as the
+						// line keeps getting it closer, and only leaves when continuing
+						// on it would cost more than a direct placed route.
 						stepCost = EXISTING_COST;
 					} else {
-						stepCost = 1.0 + (cell.bridged ? BRIDGE_PENALTY : 0.0)
+						stepCost = 1.0 + (bridged ? BRIDGE_PENALTY : 0.0)
 								+ DESCENT_PENALTY * Math.max(0, startBy - qy);
 					}
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
@@ -189,11 +203,15 @@ public final class CushionPathfinder {
 		}
 
 		if (best == startNode || best.parent == null) {
-			// Boxed in / sitting on a local optimum (e.g. up a tree): don't give up.
-			// Pick the most promising reachable spot we found — nearest the target,
-			// breaking ties toward cheaper-to-reach ones — even though it's farther
-			// than here, so travel steps down/around and re-plans from there instead
-			// of stopping dead. The manager bounds how far it will detour this way.
+			// We couldn't get any closer from here. If we can place, treat this as a
+			// dead-end to escape: step to the most promising reachable spot (nearest
+			// the target, ties toward cheaper) even though it's farther, so travel
+			// goes down/around and re-plans. If we can't place (ride-existing-only),
+			// there's nothing to detour to — stop at the closest cushion instead of
+			// backtracking pointlessly along the line.
+			if (!placementAllowed) {
+				return null;
+			}
 			Node escape = null;
 			double escapeScore = Double.MAX_VALUE;
 			for (Node n : nodes.values()) {
@@ -227,6 +245,33 @@ public final class CushionPathfinder {
 
 	/** The best cushion spot in a column at a given height band, and whether it needs a bridge block. */
 	private record Cell(Vec3 pos, boolean bridged) {
+	}
+
+	/** Packs a block column (x,z) into a single long for the existing-cushion map. */
+	private static long col(int bx, int bz) {
+		return (((long) bx & 0xFFFFFFFFL) << 32) | ((long) bz & 0xFFFFFFFFL);
+	}
+
+	/**
+	 * The existing cushion in column ({@code bx},{@code bz}) whose height is nearest
+	 * {@code preferredY} and within the vertical window, as a hop-to position, or
+	 * null if none. Lets A* ride a line at its true height whatever it rests on.
+	 */
+	private static Vec3 nearestExistingInColumn(Map<Long, List<Double>> cols, int bx, int bz, double preferredY) {
+		List<Double> ys = cols.get(col(bx, bz));
+		if (ys == null) {
+			return null;
+		}
+		double bestDist = VERT_WINDOW + 0.5;
+		Double bestY = null;
+		for (double y : ys) {
+			double d = Math.abs(y - preferredY);
+			if (d < bestDist) {
+				bestDist = d;
+				bestY = y;
+			}
+		}
+		return bestY == null ? null : new Vec3(bx + 0.5, bestY, bz + 0.5);
 	}
 
 	private static Cell computeCell(Level level, int bx, int bz, double preferredY, boolean allowBridge) {
