@@ -463,7 +463,7 @@ public final class CushionTravelManager {
 		}
 	}
 
-	/** Target mode: follow the planned A* route; greedy line-reuse is only a fallback. */
+	/** Target mode: ride a reachable existing cushion toward the goal first, else follow the A* route. */
 	private void advanceTarget(LocalPlayer player, Level level, Cushion current, Vec3 cur, double range) {
 		double d = horizDist(cur, targetX, targetZ);
 		if (d <= ARRIVE_DIST) {
@@ -478,29 +478,13 @@ public final class CushionTravelManager {
 			return;
 		}
 
-		boolean canPlace = config.autoPlace() && hasCushionAvailable(player);
-		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
-
-		// Follow the sticky A* route first. It already prefers existing lines (so it
-		// still rides a line rather than laying a parallel one) and can route down
-		// or around obstacles, so greedy reuse must not pre-empt it — otherwise a
-		// cushion that happens to be nearer the target (e.g. back up a tree we are
-		// escaping) would keep yanking us off the route.
-		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
-		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge, canPlace);
-		if (node != null) {
-			Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
-			if (existing == null && !canPlace) {
-				stop("no cushions to build toward the target");
-				return;
-			}
-			if (stepToward(player, level, current, player.getEyePosition(), range, node)) {
-				return;
-			}
-			plannedPath = null; // couldn't act on this node — replan next tick
-		}
-
-		// Fallback: hop to the reachable existing cushion closest to the target.
+		// Ride a reachable existing cushion toward the target FIRST, re-checked
+		// every tick. This is what reuses a line — placed on an earlier trip or by
+		// hand, whatever it rests on — instead of laying a parallel one, and doing
+		// it here (not only inside the A* plan) means a stale placement route can't
+		// lock us into building beside a line we could just ride. The ratchet keeps
+		// it moving forward and dead-ends we've fled are skipped, so it can't yank
+		// us backward or back onto a dead-end.
 		Cushion reuse = bestExistingToward(player, level, current, cur, d);
 		if (reuse != null) {
 			hopSource = current;
@@ -509,22 +493,34 @@ public final class CushionTravelManager {
 			mountCushion(player, reuse);
 			return;
 		}
+
+		boolean canPlace = config.autoPlace() && hasCushionAvailable(player);
+		boolean canBridge = canPlace && findHotbarBlockSlot(player) >= 0;
+
+		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
+		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge, canPlace);
 		if (node == null) {
 			stop(String.format("stopped %.0f blocks from target (no route)", d));
+			return;
+		}
+		Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
+		if (existing == null && !canPlace) {
+			stop("no cushions to build toward the target");
+			return;
+		}
+		if (!stepToward(player, level, current, player.getEyePosition(), range, node)) {
+			plannedPath = null; // couldn't act on this node — replan next tick
 		}
 	}
 
 	/**
 	 * The reachable existing cushion (other than the current one) that gets us
-	 * closest to the target, or null if none makes real progress. Prefers the
-	 * one nearest the target so it hops as far along an existing line as its
-	 * reach allows.
+	 * closest to the target, or null if none makes real progress. Prefers the one
+	 * nearest the target so it hops as far along an existing line as reach allows,
+	 * never picks one farther than our best progress (the ratchet, so it can't
+	 * bounce), and skips cushions sitting on spots we've learned are dead-ends.
 	 */
 	private Cushion bestExistingToward(LocalPlayer player, Level level, Cushion current, Vec3 cur, double curDist) {
-		// Never pick something farther from the target than our best progress so
-		// far (the ratchet) — this is what stops A↔B bouncing. Require a real step
-		// of progress past it, and don't immediately hop back onto the cushion we
-		// are mid-hop leaving.
 		double floor = Math.min(curDist, committedTargetDist);
 		double bestDist = floor - 0.5;
 		Cushion best = null;
@@ -532,6 +528,9 @@ public final class CushionTravelManager {
 		for (Cushion c : CushionNav.cushionsWithin(level, player.getEyePosition(), radius)) {
 			if (c == current || c == hopSource || !c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
 				continue;
+			}
+			if (deadEnds.contains(BlockPos.containing(c.position()).asLong())) {
+				continue; // a dead-end we fled — don't ride back into it
 			}
 			double dd = horizDist(c.position(), targetX, targetZ);
 			if (dd < bestDist) {

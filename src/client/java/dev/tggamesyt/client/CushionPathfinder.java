@@ -42,13 +42,18 @@ public final class CushionPathfinder {
 	private static final double EXISTING_COST = 0.15;
 	private static final double EXISTING_RADIUS = 48.0;
 	private static final int MAX_REL = 256;           // search radius from the start (blocks)
-	// Per-hop surcharge for every block a placed spot sits *below* the start
-	// height. Dropping into a valley and climbing back out therefore costs more
-	// than staying level, so a flat route — an existing bridge, or a self-built
-	// one — is preferred over descending into a dip. It is asymmetric: rising is
-	// NOT penalised, so going up and over a hill or mountain is free and preferred
-	// to a long way around; only a genuinely lower target makes it descend.
+	// Surcharge for dropping below the start height (per hop, by depth). Diving
+	// into a valley and climbing back out costs more than staying level, so a flat
+	// route — an existing bridge or a self-built one — wins over descending.
 	private static final double DESCENT_PENALTY = 0.4;
+	// Surcharge for *ascending*, charged per block of climb on the hop that climbs
+	// (a delta, not an absolute). So the cost of going up is paid once for the
+	// ascent and NOT again for every hop spent up high — which means a wide, tall
+	// mountain is cheap to cross (one ascent, then free traversal) and worth going
+	// over, while a narrow obstacle like a tree, where going around is only a few
+	// hops, is cheaper to round than to climb. This is what keeps it off trees
+	// (where climbing dead-ends) without making it shun hills and mountains.
+	private static final double CLIMB_STEP_PENALTY = 0.3;
 
 	private CushionPathfinder() {
 	}
@@ -180,8 +185,10 @@ public final class CushionPathfinder {
 						// on it would cost more than a direct placed route.
 						stepCost = EXISTING_COST;
 					} else {
+						int curY = Mth.floor(cur.pos.y);
 						stepCost = 1.0 + (bridged ? BRIDGE_PENALTY : 0.0)
-								+ DESCENT_PENALTY * Math.max(0, startBy - qy);
+								+ DESCENT_PENALTY * Math.max(0, startBy - qy)
+								+ CLIMB_STEP_PENALTY * Math.max(0, qy - curY);
 					}
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;

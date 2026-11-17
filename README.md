@@ -70,21 +70,25 @@ Settings (`breakbehind`, `autoplace`, `showpath`, `smoothcamera`) persist in
 
 * **Toward a target**, routing is a bounded **A\* search** over reachable cushion
   spots whose cost is essentially the number of hops, so it takes the **fewest-hop
-  route** — up and over a hill or mountain, onto an existing bridge, or across a
-  short self-built one — rather than a long detour. Climbing is free, so it will
-  go over high ground instead of around it, but **dropping below your starting
-  height** carries a small per-hop surcharge, so it bridges across a dip (or rides
-  a bridge already there) rather than diving into a valley and climbing back out.
-  It strongly prefers **reusing an existing line** (including one it placed
-  earlier) over laying a fresh one beside it — each cushion is a route node at its
-  real height, so a line is reused even when it rests on slabs, paths or farmland
-  at a fractional height, and riding one is so much cheaper than place-then-mount
-  that it sticks to a line as long as it keeps getting closer, only leaving when
-  continuing on it would cost more than a direct placed route. When it **can't
-  place** (auto-place off, or out of cushions) it rides existing lines as far as
-  they take it toward the target and only stops when they genuinely run out —
-  never while more reachable cushions still lead closer. The chosen path is
-  followed node-by-node (a sticky cursor, not re-derived every hop) and an
+  route** rather than a long detour. The cost of **climbing** is charged once for
+  the ascent (not for every hop spent up high), so a wide hill or mountain is
+  cheap to cross and it goes up and **over** it — but a narrow obstacle like a
+  **tree**, where going around is only a few hops, is cheaper to **round** than to
+  climb onto (which is also why it no longer scrambles up trees into a dead-end).
+  **Dropping below your starting height** carries a surcharge too, so it bridges
+  across a dip (or rides a bridge already there) rather than diving into a valley
+  and climbing back out. It strongly prefers **reusing an existing line** (one it
+  placed earlier or you placed by hand) over laying a fresh one beside it, and it
+  checks for a rideable existing cushion **every tick** — not just when it plans —
+  so a stale placement route can never lock it into building a parallel line. Each
+  cushion is a route node at its real height, so a line is reused even when it
+  rests on slabs, paths or farmland at a fractional height, and riding one is so
+  much cheaper than place-then-mount that it sticks to a line as long as it keeps
+  getting closer, only leaving when continuing on it would cost more than a direct
+  placed route. When it **can't place** (auto-place off, or out of cushions) it
+  rides existing lines as far as they take it toward the target and only stops
+  when they genuinely run out — never while more reachable cushions still lead
+  closer. The route is followed node-by-node (a sticky cursor) and an
   anti-backtrack ratchet keeps it from hopping to a spot farther from the target
   than the best it has reached, so it can't oscillate between two cushions; it's
   only recomputed when the next node goes out of reach. If it hits a dead-end —
