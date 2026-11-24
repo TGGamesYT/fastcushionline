@@ -37,23 +37,25 @@ public final class CushionPathfinder {
 	// rather than a long detour. Bridging costs a little extra so a real surface
 	// of similar length is preferred, but not enough to favour a big detour.
 	private static final double BRIDGE_PENALTY = 0.5;
-	// Hopping onto a cushion that already exists is nearly free, so an existing
-	// line is strongly preferred over placing a fresh parallel one beside it.
-	private static final double EXISTING_COST = 0.15;
-	private static final double EXISTING_RADIUS = 48.0;
+	// Cost is time: placing a cushion and then mounting it takes about twice as
+	// long as just mounting one that's already there, so riding an existing cushion
+	// costs half a placed hop. That makes it ride a line whenever doing so is really
+	// faster — but no longer makes a long winding detour over dozens of existing
+	// cushions look "free" next to a short direct placed route.
+	private static final double EXISTING_COST = 0.5;
+	// How far around the start to look for existing cushions. Wide, so a line that
+	// first heads away from the target (around a lake, back along a previous route)
+	// is still seen as one route and ridden instead of treated as a dead end.
+	private static final double EXISTING_RADIUS = 128.0;
 	private static final int MAX_REL = 256;           // search radius from the start (blocks)
 	// Surcharge for dropping below the start height (per hop, by depth). Diving
 	// into a valley and climbing back out costs more than staying level, so a flat
 	// route — an existing bridge or a self-built one — wins over descending.
 	private static final double DESCENT_PENALTY = 0.4;
-	// Surcharge for *ascending*, charged per block of climb on the hop that climbs
-	// (a delta, not an absolute). So the cost of going up is paid once for the
-	// ascent and NOT again for every hop spent up high — which means a wide, tall
-	// mountain is cheap to cross (one ascent, then free traversal) and worth going
-	// over, while a narrow obstacle like a tree, where going around is only a few
-	// hops, is cheaper to round than to climb. This is what keeps it off trees
-	// (where climbing dead-ends) without making it shun hills and mountains.
-	private static final double CLIMB_STEP_PENALTY = 0.3;
+	// Climbing is free, so hills and mountains are crossed rather than skirted.
+	// Trees are kept out by block type instead (leaves/logs are never routed onto —
+	// see CushionNav.isRoutable), which is what stops it scrambling up a canopy
+	// without touching mountain climbing at all.
 
 	private CushionPathfinder() {
 	}
@@ -144,7 +146,8 @@ public final class CushionPathfinder {
 					boolean nodeExisting;
 					boolean bridged = false;
 					Vec3 existNode = nearestExistingInColumn(existingCol, nbx, nbz, cur.pos.y);
-					if (existNode != null && CushionNav.mountReachable(eye, existNode, entityRange)) {
+					if (existNode != null && CushionNav.mountReachable(eye, existNode, entityRange)
+							&& CushionNav.isRideable(level, existNode, eyeOffset)) {
 						q = existNode;
 						nodeExisting = true;
 					} else if (placementAllowed) {
@@ -152,7 +155,7 @@ public final class CushionPathfinder {
 						long memoKey = key(nbx, curY, nbz, startBx, startBy, startBz);
 						Cell cell = columnMemo.get(memoKey);
 						if (cell == null) {
-							cell = computeCell(level, nbx, nbz, cur.pos.y, allowBridge);
+							cell = computeCell(level, nbx, nbz, cur.pos.y, allowBridge, eyeOffset);
 							columnMemo.put(memoKey, cell);
 						}
 						if (cell.pos == null) {
@@ -185,10 +188,8 @@ public final class CushionPathfinder {
 						// on it would cost more than a direct placed route.
 						stepCost = EXISTING_COST;
 					} else {
-						int curY = Mth.floor(cur.pos.y);
 						stepCost = 1.0 + (bridged ? BRIDGE_PENALTY : 0.0)
-								+ DESCENT_PENALTY * Math.max(0, startBy - qy)
-								+ CLIMB_STEP_PENALTY * Math.max(0, qy - curY);
+								+ DESCENT_PENALTY * Math.max(0, startBy - qy);
 					}
 					long k = key(nbx, qy, nbz, startBx, startBy, startBz);
 					double ng = cur.g + stepCost;
@@ -281,13 +282,17 @@ public final class CushionPathfinder {
 		return bestY == null ? null : new Vec3(bx + 0.5, bestY, bz + 0.5);
 	}
 
-	private static Cell computeCell(Level level, int bx, int bz, double preferredY, boolean allowBridge) {
-		Vec3 q = CushionNav.findSurfaceInColumn(level, bx, bz, preferredY, VERT_WINDOW, false);
+	private static Cell computeCell(Level level, int bx, int bz, double preferredY, boolean allowBridge,
+			Vec3 eyeOffset) {
+		// Routable spots only: never a tree top, never where the seated player would
+		// suffocate. A column whose nearest surface is a canopy keeps looking for the
+		// ground beside/under it, which is what routes it around or under a tree.
+		Vec3 q = CushionNav.findSurfaceInColumn(level, bx, bz, preferredY, VERT_WINDOW, false, eyeOffset);
 		if (q != null) {
 			return new Cell(q, false);
 		}
 		if (allowBridge) {
-			Vec3 bridge = CushionNav.findBridgeCellInColumn(level, bx, bz, preferredY, VERT_WINDOW, false);
+			Vec3 bridge = CushionNav.findBridgeCellInColumn(level, bx, bz, preferredY, VERT_WINDOW, false, eyeOffset);
 			if (bridge != null) {
 				return new Cell(bridge, true);
 			}

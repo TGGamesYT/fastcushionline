@@ -115,6 +115,12 @@ public final class CushionTravelManager {
 	// from the target than this (minus a margin), so travel can't bounce back and
 	// forth between two cushions while the planned route points forward.
 	private double committedTargetDist = Double.MAX_VALUE;
+	// True while we're following a planned route that genuinely ends closer to the
+	// target than our best so far. Such a route may first head away (a line that
+	// loops around a lake, or back along a previous trip), so while it holds, the
+	// "no progress" / detour watchdogs and the anti-backtrack re-seat filter stand
+	// down — they exist to stop aimless wandering, not a real route.
+	private boolean planImproves = false;
 
 	// Smooth-camera slide, done entirely at render time so it is immune to
 	// tick/packet ordering (sampling the seat in the tick caused a one-frame snap
@@ -169,6 +175,9 @@ public final class CushionTravelManager {
 					// Ratchet our best progress forward as we actually land on cushions.
 					committedTargetDist = Math.min(committedTargetDist,
 							horizDist(current.position(), targetX, targetZ));
+					if (planImproves) {
+						noProgressTicks = 0; // riding a real route, even if it bends away first
+					}
 				}
 			}
 			lastCushion = current;
@@ -463,7 +472,13 @@ public final class CushionTravelManager {
 		}
 	}
 
-	/** Target mode: ride a reachable existing cushion toward the goal first, else follow the A* route. */
+	/**
+	 * Target mode: follow the A* route. The route already weighs riding existing
+	 * cushions (half the time of place-then-mount) against placing new ones, and it
+	 * is re-planned before every placement (see {@link #targetNextNode}), so a line
+	 * that would be faster is picked up the moment it's in view. Greedy line-reuse
+	 * is only a fallback when the planner has nothing.
+	 */
 	private void advanceTarget(LocalPlayer player, Level level, Cushion current, Vec3 cur, double range) {
 		double d = horizDist(cur, targetX, targetZ);
 		if (d <= ARRIVE_DIST) {
@@ -472,25 +487,10 @@ public final class CushionTravelManager {
 		}
 		// Bound how far we'll wander away from our best approach while detouring
 		// around an obstacle, so a dead-end escape can't turn into endless roaming.
-		if (committedTargetDist != Double.MAX_VALUE && d > committedTargetDist + MAX_DETOUR) {
+		// A planned route that really ends closer is exempt — it's going somewhere.
+		if (!planImproves && committedTargetDist != Double.MAX_VALUE && d > committedTargetDist + MAX_DETOUR) {
 			stop(String.format("gave up detouring (%.0f blocks off the best approach)",
 					d - committedTargetDist));
-			return;
-		}
-
-		// Ride a reachable existing cushion toward the target FIRST, re-checked
-		// every tick. This is what reuses a line — placed on an earlier trip or by
-		// hand, whatever it rests on — instead of laying a parallel one, and doing
-		// it here (not only inside the A* plan) means a stale placement route can't
-		// lock us into building beside a line we could just ride. The ratchet keeps
-		// it moving forward and dead-ends we've fled are skipped, so it can't yank
-		// us backward or back onto a dead-end.
-		Cushion reuse = bestExistingToward(player, level, current, cur, d);
-		if (reuse != null) {
-			hopSource = current;
-			pendingCushionPos = reuse.position();
-			pendingWait = 0;
-			mountCushion(player, reuse);
 			return;
 		}
 
@@ -499,17 +499,33 @@ public final class CushionTravelManager {
 
 		Vec3 eyeOffset = player.getEyePosition().subtract(cur);
 		Vec3 node = targetNextNode(level, cur, eyeOffset, range, player.blockInteractionRange(), canBridge, canPlace);
-		if (node == null) {
-			stop(String.format("stopped %.0f blocks from target (no route)", d));
-			return;
-		}
-		Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
-		if (existing == null && !canPlace) {
-			stop("no cushions to build toward the target");
-			return;
-		}
-		if (!stepToward(player, level, current, player.getEyePosition(), range, node)) {
+		if (node != null) {
+			Cushion existing = CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS);
+			if (existing == null && !canPlace) {
+				stop("no cushions to build toward the target");
+				return;
+			}
+			if (stepToward(player, level, current, player.getEyePosition(), range, node)) {
+				return;
+			}
 			plannedPath = null; // couldn't act on this node — replan next tick
+			return;
+		}
+
+		// The planner found nothing: as a last resort, ride any reachable existing
+		// cushion that still gets us closer.
+		Cushion reuse = bestExistingToward(player, level, current, cur, d);
+		if (reuse != null) {
+			hopSource = current;
+			pendingCushionPos = reuse.position();
+			pendingWait = 0;
+			mountCushion(player, reuse);
+			return;
+		}
+		if (CushionNav.onTree(level, cur)) {
+			stop("you're up a tree with no way down by cushion — get down and run it again");
+		} else {
+			stop(String.format("stopped %.0f blocks from target (no route)", d));
 		}
 	}
 
@@ -532,6 +548,9 @@ public final class CushionTravelManager {
 			if (deadEnds.contains(BlockPos.containing(c.position()).asLong())) {
 				continue; // a dead-end we fled — don't ride back into it
 			}
+			if (!CushionNav.isRideable(level, c.position(), seatedEyeOffset(player))) {
+				continue; // up a tree, or the player would suffocate there
+			}
 			double dd = horizDist(c.position(), targetX, targetZ);
 			if (dd < bestDist) {
 				bestDist = dd;
@@ -539,6 +558,11 @@ public final class CushionTravelManager {
 			}
 		}
 		return best;
+	}
+
+	/** The player's eye offset from the cushion they're on, or null if not seated. */
+	private static Vec3 seatedEyeOffset(LocalPlayer player) {
+		return player.getVehicle() instanceof Cushion c ? player.getEyePosition().subtract(c.position()) : null;
 	}
 
 	/** Line mode (no target): hop the existing line, then greedily continue/​bridge it. */
@@ -558,16 +582,20 @@ public final class CushionTravelManager {
 	}
 
 	/**
-	 * The next node to move to along the planned route. Sticky: it keeps
-	 * following the current path (advancing a cursor) and only recomputes when
-	 * the path is missing/finished or its next node is out of reach.
+	 * The next node to move to along the planned route. While the next node is an
+	 * existing cushion it follows the current path (sticky, so riding a line can't
+	 * oscillate). Before it would <em>place</em> a cushion, though, it always
+	 * re-plans first: placing is the expensive, committal step, and a fresh plan
+	 * sees any existing line now in view that would be faster to ride — this is what
+	 * stops it locking onto its own placement route and building beside a line.
 	 */
 	private Vec3 targetNextNode(Level level, Vec3 cur, Vec3 eyeOffset, double range, double blockRange,
 			boolean canBridge, boolean canPlace) {
 		Vec3 eye = cur.add(eyeOffset);
 		if (plannedPath != null && pathCursor < plannedPath.size()) {
 			Vec3 node = plannedPath.get(pathCursor);
-			if (CushionNav.mountReachable(eye, node, range)) {
+			if (CushionNav.mountReachable(eye, node, range)
+					&& CushionNav.cushionAt(level, node, MOUNT_MATCH_EPS) != null) {
 				return skipAheadAlongExisting(level, eye, range);
 			}
 		}
@@ -575,8 +603,11 @@ public final class CushionTravelManager {
 				canBridge, canPlace, deadEnds);
 		if (path == null || path.size() < 2) {
 			plannedPath = null;
+			planImproves = false;
 			return null;
 		}
+		double best = Math.min(horizDist(cur, targetX, targetZ), committedTargetDist);
+		planImproves = horizDist(path.get(path.size() - 1), targetX, targetZ) < best - 0.5;
 		plannedPath = path;
 		pathCursor = 1;
 		while (pathCursor < path.size() && path.get(pathCursor).distanceToSqr(cur) < 0.36) {
@@ -633,10 +664,12 @@ public final class CushionTravelManager {
 		if (!player.isWithinBlockInteractionRange(support, 1.0)) {
 			return false;
 		}
-		if (CushionNav.isPlaceable(level, node)) {
+		Vec3 eyeOffset = seatedEyeOffset(player);
+		if (CushionNav.isRoutable(level, node, true, eyeOffset)) {
 			return commitPlacement(player, new CushionNav.PlacePlan(node, support, node));
 		}
 		if (!CushionNav.hasSupport(level, node) && CushionNav.cellClear(level, node, true)
+				&& CushionNav.headClear(level, node, eyeOffset)
 				&& CushionNav.blockPlaceAnchor(level, support) != null) {
 			return commitBridge(player, level, new CushionNav.PlacePlan(node, support, node));
 		}
@@ -845,8 +878,8 @@ public final class CushionTravelManager {
 	}
 
 	private CushionNav.PlacePlan validatedPlacement(LocalPlayer player, Vec3 eye, Level level, Vec3 q, double range) {
-		if (!CushionNav.isPlaceable(level, q)) {
-			return null;
+		if (!CushionNav.isRoutable(level, q, true, seatedEyeOffset(player))) {
+			return null; // not placeable, on a tree, or the player would suffocate
 		}
 		BlockPos support = CushionNav.supportBlock(q);
 		if (!player.isWithinBlockInteractionRange(support, 1.0)) {
@@ -1076,6 +1109,7 @@ public final class CushionTravelManager {
 		closestToTarget = Double.MAX_VALUE;
 		noProgressTicks = 0;
 		committedTargetDist = Double.MAX_VALUE;
+		planImproves = false;
 		deadEnds.clear();
 	}
 
@@ -1167,6 +1201,14 @@ public final class CushionTravelManager {
 	}
 
 	private Cushion pickReachableCushion(LocalPlayer player, Level level) {
+		// Mid-hop ejection: re-seat onto the cushion we were heading for, whichever
+		// way it lies — on a route that bends away first, that's still the route.
+		if (pendingCushionPos != null) {
+			Cushion pending = CushionNav.cushionAt(level, pendingCushionPos, MOUNT_MATCH_EPS);
+			if (pending != null && pending.isAlive() && player.isWithinEntityInteractionRange(pending, 1.0)) {
+				return pending;
+			}
+		}
 		Vec3 pos = player.position();
 		double range = player.entityInteractionRange();
 		List<Cushion> near = CushionNav.cushionsWithin(level, player.getEyePosition(), range + 1.0);
@@ -1176,7 +1218,11 @@ public final class CushionTravelManager {
 			if (!c.isAlive() || !player.isWithinEntityInteractionRange(c, 1.0)) {
 				continue;
 			}
-			if (hasTarget) {
+			if (!CushionNav.isRideable(level, c.position(), null)
+					|| deadEnds.contains(BlockPos.containing(c.position()).asLong())) {
+				continue; // never re-seat up a tree, into a wall, or onto a known dead-end
+			}
+			if (hasTarget && !planImproves) {
 				double dd = horizDist(c.position(), targetX, targetZ);
 				// Don't re-seat onto a cushion well behind our best progress — that
 				// is the mid-hop bounce-back that looks like oscillation.

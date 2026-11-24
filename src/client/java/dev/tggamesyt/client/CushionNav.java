@@ -2,6 +2,7 @@ package dev.tggamesyt.client;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.decoration.Cushion;
@@ -111,6 +112,60 @@ public final class CushionNav {
 	}
 
 	/**
+	 * Where a seated player's eye sits relative to their cushion, used to check head
+	 * room before the player is actually seated (once seated, the real offset is
+	 * measured and passed in instead).
+	 */
+	public static final Vec3 DEFAULT_SEATED_EYE = new Vec3(0, 1.4, 0);
+
+	/**
+	 * Leaves and logs — i.e. trees. Cushion routes are never laid or ridden across
+	 * these: a tree canopy is a dead-end you can't step back down from with cushion
+	 * reach, so going up one just strands you. Telling trees apart by block type
+	 * (rather than by height) leaves mountain and hill climbing completely alone.
+	 */
+	public static boolean isTreeBlock(BlockState state) {
+		return state.is(BlockTags.LEAVES) || state.is(BlockTags.LOGS);
+	}
+
+	/** Whether a cushion at {@code cushionPos} rests on a tree (leaves or a log). */
+	public static boolean onTree(Level level, Vec3 cushionPos) {
+		BlockPos below = BlockPos.containing(cushionPos.x, cushionPos.y - 0.05, cushionPos.z);
+		return isTreeBlock(level.getBlockState(below));
+	}
+
+	/**
+	 * Whether a player seated on a cushion at {@code cushionPos} keeps their head out
+	 * of suffocating blocks — checks the block their eye would be in and the block
+	 * directly above the cushion. {@code eyeOffset} may be null to use
+	 * {@link #DEFAULT_SEATED_EYE}.
+	 */
+	public static boolean headClear(Level level, Vec3 cushionPos, Vec3 eyeOffset) {
+		Vec3 off = eyeOffset != null ? eyeOffset : DEFAULT_SEATED_EYE;
+		BlockPos eye = BlockPos.containing(cushionPos.add(off));
+		BlockPos above = BlockPos.containing(cushionPos).above();
+		return !suffocates(level, eye) && !suffocates(level, above);
+	}
+
+	private static boolean suffocates(Level level, BlockPos pos) {
+		return level.getBlockState(pos).isSuffocating(level, pos);
+	}
+
+	/**
+	 * A spot travel may use: legally placeable, not on a tree, and the seated player
+	 * won't suffocate there.
+	 */
+	public static boolean isRoutable(Level level, Vec3 cushionPos, boolean checkEntities, Vec3 eyeOffset) {
+		return isPlaceable(level, cushionPos, checkEntities) && !onTree(level, cushionPos)
+				&& headClear(level, cushionPos, eyeOffset);
+	}
+
+	/** Whether an existing cushion is one travel may ride: not on a tree, head clear. */
+	public static boolean isRideable(Level level, Vec3 cushionPos, Vec3 eyeOffset) {
+		return !onTree(level, cushionPos) && headClear(level, cushionPos, eyeOffset);
+	}
+
+	/**
 	 * Finds a placeable cushion cell in the block column ({@code bx},{@code bz})
 	 * whose height is as close as possible to {@code preferredY}, searching
 	 * {@code window} blocks up and down. This is what lets auto-placement follow
@@ -119,11 +174,17 @@ public final class CushionNav {
 	 * @return the cushion position, or null if the column has no usable surface.
 	 */
 	public static Vec3 findSurfaceInColumn(Level level, int bx, int bz, double preferredY, int window) {
-		return findSurfaceInColumn(level, bx, bz, preferredY, window, true);
+		return findSurfaceInColumn(level, bx, bz, preferredY, window, true, null);
 	}
 
+	/**
+	 * As above, but only returns <em>routable</em> spots (see {@link #isRoutable}):
+	 * a column whose nearest surface is a tree top keeps searching for the ground
+	 * under/beside it instead, and spots where the seated player would suffocate are
+	 * skipped. {@code eyeOffset} may be null.
+	 */
 	public static Vec3 findSurfaceInColumn(Level level, int bx, int bz, double preferredY, int window,
-			boolean checkEntities) {
+			boolean checkEntities, Vec3 eyeOffset) {
 		int base = Mth.floor(preferredY + 0.5);
 		for (int radius = 0; radius <= window; radius++) {
 			// Prefer the height closest to preferredY; on ties try the lower one
@@ -131,7 +192,7 @@ public final class CushionNav {
 			for (int sign : (radius == 0 ? new int[] {0} : new int[] {-1, 1})) {
 				int cellY = base + sign * radius;
 				Vec3 pos = new Vec3(bx + 0.5, cellY, bz + 0.5);
-				if (isPlaceable(level, pos, checkEntities)) {
+				if (isRoutable(level, pos, checkEntities, eyeOffset)) {
 					return pos;
 				}
 			}
@@ -148,11 +209,11 @@ public final class CushionNav {
 	 * @return the cushion position for a bridgeable cell, or null.
 	 */
 	public static Vec3 findBridgeCellInColumn(Level level, int bx, int bz, double preferredY, int window) {
-		return findBridgeCellInColumn(level, bx, bz, preferredY, window, true);
+		return findBridgeCellInColumn(level, bx, bz, preferredY, window, true, null);
 	}
 
 	public static Vec3 findBridgeCellInColumn(Level level, int bx, int bz, double preferredY, int window,
-			boolean checkEntities) {
+			boolean checkEntities, Vec3 eyeOffset) {
 		int base = Mth.floor(preferredY + 0.5);
 		for (int radius = 0; radius <= window; radius++) {
 			for (int sign : (radius == 0 ? new int[] {0} : new int[] {-1, 1})) {
@@ -160,6 +221,9 @@ public final class CushionNav {
 				Vec3 q = new Vec3(bx + 0.5, cellY, bz + 0.5);
 				if (!cellClear(level, q, checkEntities) || hasSupport(level, q)) {
 					continue; // occupied, or already has natural support (not a bridge case)
+				}
+				if (!headClear(level, q, eyeOffset)) {
+					continue; // the seated player would suffocate here
 				}
 				BlockPos support = supportBlock(q);
 				if (replaceable(level, support) && blockPlaceAnchor(level, support) != null) {

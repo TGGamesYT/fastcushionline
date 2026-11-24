@@ -69,35 +69,34 @@ Settings (`breakbehind`, `autoplace`, `showpath`, `smoothcamera`) persist in
 ### Pathfinding & auto-placement details
 
 * **Toward a target**, routing is a bounded **A\* search** over reachable cushion
-  spots whose cost is essentially the number of hops, so it takes the **fewest-hop
-  route** rather than a long detour. The cost of **climbing** is charged once for
-  the ascent (not for every hop spent up high), so a wide hill or mountain is
-  cheap to cross and it goes up and **over** it — but a narrow obstacle like a
-  **tree**, where going around is only a few hops, is cheaper to **round** than to
-  climb onto (which is also why it no longer scrambles up trees into a dead-end).
-  **Dropping below your starting height** carries a surcharge too, so it bridges
+  spots, costed by **time**: mounting a cushion that's already there costs half
+  as much as placing one and then mounting it. So it rides an existing line
+  whenever that's genuinely faster, and places a direct route when a line would
+  only wind around.
+* **Trees are never used.** Cushions are never placed on — or ridden across —
+  leaves or logs: a canopy is a dead-end you can't step back down from within
+  cushion reach. A column whose top is a tree keeps looking for the ground
+  under/beside it, so routes go **around or under** trees. Because this is decided
+  by block type rather than height, **climbing hills and mountains is free** and
+  it goes over high ground instead of around it.
+* **Dropping below your starting height** carries a surcharge, so it bridges
   across a dip (or rides a bridge already there) rather than diving into a valley
-  and climbing back out. It strongly prefers **reusing an existing line** (one it
-  placed earlier or you placed by hand) over laying a fresh one beside it, and it
-  checks for a rideable existing cushion **every tick** — not just when it plans —
-  so a stale placement route can never lock it into building a parallel line. Each
-  cushion is a route node at its real height, so a line is reused even when it
-  rests on slabs, paths or farmland at a fractional height, and riding one is so
-  much cheaper than place-then-mount that it sticks to a line as long as it keeps
-  getting closer, only leaving when continuing on it would cost more than a direct
-  placed route. When it **can't place** (auto-place off, or out of cushions) it
-  rides existing lines as far as they take it toward the target and only stops
-  when they genuinely run out — never while more reachable cushions still lead
-  closer. The route is followed node-by-node (a sticky cursor) and an
-  anti-backtrack ratchet keeps it from hopping to a spot farther from the target
-  than the best it has reached, so it can't oscillate between two cushions; it's
-  only recomputed when the next node goes out of reach. If it hits a dead-end —
-  climbs onto a tree or a ledge with nowhere to continue — it steps back down and
-  around, **remembers that spot for the rest of the trip** so it won't bounce
-  straight back into it, and bounds how far it will detour. It keeps going until
-  it reaches the target or genuinely can't get any closer, and a progress watchdog
-  stops it if it stalls. The route is drawn in the world as a line (toggle with
-  `/fcl showpath`).
+  and climbing back out.
+* **No suffocation:** a spot is only used if the seated player's head would be
+  clear of suffocating blocks.
+* **Reusing lines:** each existing cushion is a route node at its real height
+  (slabs, paths and farmland included). The route is re-planned before every
+  placement, so a line that comes into view and would be faster is picked up
+  immediately instead of building beside it. When it **can't place** (auto-place
+  off, or out of cushions) it rides existing lines as far as they lead — even a
+  line that first bends away from the target, as long as it ends up closer — and
+  only stops when they genuinely run out.
+* The route is followed node-by-node; while riding a line it hops as far as reach
+  allows. If it hits a dead-end (e.g. a ledge with nowhere to continue) it steps
+  back and around, **remembers that spot for the rest of the trip** so it won't
+  bounce straight back into it, and bounds how far it will detour. A progress
+  watchdog stops it if it genuinely stalls. The route is drawn in the world as a
+  line (toggle with `/fcl showpath`).
 * **Drowning safeguard:** travelling in survival, if the route leaves you seated
   underwater with your air almost gone and no quick way out, it drops you off the
   cushion so you can surface, and stops — it won't let you drown.
